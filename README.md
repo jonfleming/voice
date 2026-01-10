@@ -13,6 +13,7 @@ A small voice assistant that integrates Wyoming Faster Whisper (STT), Ollama (LL
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-pyaudio ffmpeg
+sudo apt install -y portaudio19-dev
 ```
 
 - Option B — if you prefer to build `pyaudio` from pip:
