@@ -154,11 +154,11 @@ void http_test_get() {
   http.end();
 }
 
-// Helper: write 44-byte WAV header to the given client for PCM16, mono/stereo as configured
+// Helper: write 44-byte WAV header to the given client for PCM32, stereo as configured
 void write_wav_header_to_client(WiFiClient &client, uint32_t data_bytes) {
-  uint32_t sample_rate = 16000; // adjust if your driver uses a different rate
-  uint16_t channels = 1;
-  uint16_t bits_per_sample = 16;
+  uint32_t sample_rate = 32000; // match hardware sample rate
+  uint16_t channels = 2;
+  uint16_t bits_per_sample = 32;
 
   uint32_t byte_rate = sample_rate * channels * bits_per_sample / 8;
   uint16_t block_align = channels * bits_per_sample / 8;
