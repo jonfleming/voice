@@ -297,48 +297,53 @@ void play_audio_from_psram(uint8_t* audio_data, size_t data_len) {
 
 // Sends audio to Wyoming Faster Whisper for transcription
 String transcribe_audio(uint8_t* audio_data, size_t data_len) {
-  Serial.println("Transcribing...");
+  Serial.println("Transcribing audio with corrected HTTP POST...");
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("Not connected to WiFi for transcription.");
     return "";
   }
 
+  // Define boundary.
+  String boundary = "---------------------------7da24f2e50046";
+
+  // Construct the multipart form data parts
+  String body_start = "--" + boundary + "\r\n";
+  body_start += "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n";
+  body_start += "Content-Type: audio/wav\r\n\r\n";
+
+  // Construct the final part of the multipart body in a single expression
+  // to rule out any potential side effects from chained appends.
+  String body_end = String("\r\n--") + boundary + "\r\n" +
+                    "Content-Disposition: form-data; name=\"model\"\r\n\r\n" +
+                    "Systran/faster-distil-whisper-small.en" +
+                    String("\r\n--") + boundary + "--\r\n";
+
+  // Calculate total payload size
+  size_t total_payload_size = body_start.length() + data_len + body_end.length();
+  
+  // Allocate a buffer in PSRAM for the entire request body
+  uint8_t *payload_buffer = (uint8_t *)heap_caps_malloc(total_payload_size, MALLOC_CAP_SPIRAM);
+  if (payload_buffer == NULL) {
+    Serial.println("Failed to allocate PSRAM for HTTP payload!");
+    return "";
+  }
+
+  // Assemble the payload in the buffer
+  size_t offset = 0;
+  memcpy(payload_buffer + offset, body_start.c_str(), body_start.length());
+  offset += body_start.length();
+  memcpy(payload_buffer + offset, audio_data, data_len);
+  offset += data_len;
+  memcpy(payload_buffer + offset, body_end.c_str(), body_end.length());
+
   HTTPClient http;
   String url = String("http://") + SERVER_IP + ":" + String(WHISPER_PORT) + "/v1/audio/transcriptions";
   http.begin(url);
+  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
 
-  http.addHeader("Content-Type", "multipart/form-data; boundary=---------------------------7da24f2e50046");
-
-  String httpRequestData = "-----------------------------7da24f2e50046\r\n";
-  httpRequestData += "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n";
-  httpRequestData += "Content-Type: audio/wav\r\n\r\n";
-
-  // Send the first part of the request body
-  http.sendRequest("POST", httpRequestData);
-
-  // Send the WAV data in chunks
-  WiFiClient* client = http.get  Client();
-  size_t bytesSent = 0;
-  while (bytesSent < data_len) {
-    size_t bytesToWrite = data_len - bytesSent;
-    if (bytesToWrite > 1024) { // Send in 1KB chunks
-      bytesToWrite = 1024;
-    }
-    client->write(audio_data + bytesSent, bytesToWrite);
-    bytesSent += bytesToWrite;
-    vTaskDelay(pdMS_TO_TICKS(1)); // Yield to other tasks
-  }
-
-  // Send the closing boundary and model data
-  String closingData = "\r\n-----------------------------7da24f2e50046\r\n";
-  closingData += "Content-Disposition: form-data; name=\"model\"\r\n\r\n";
-  closingData += "Systran/faster-distil-whisper-small.en\r\n"; // STT_MODEL
-  closingData += "-----------------------------7da24f2e50046--\r\n";
-  
-  client->print(closingData);
-
-  int httpResponseCode = http.endRequest(); // Finalize the request
+  // Send the request with the complete payload
+  int httpResponseCode = http.POST(payload_buffer, total_payload_size);
 
   String transcription = "";
   if (httpResponseCode > 0) {
@@ -362,6 +367,7 @@ String transcribe_audio(uint8_t* audio_data, size_t data_len) {
   }
 
   http.end();
+  heap_caps_free(payload_buffer); // Free the buffer
   return transcription;
 }
 
