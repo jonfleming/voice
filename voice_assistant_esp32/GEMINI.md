@@ -52,3 +52,5 @@ Acknowledgements
 ----------------
 
 This project gathers small driver examples and a simple sketch to make experimenting with ESP32 audio straightforward.
+
+Using GitHub Copilot
