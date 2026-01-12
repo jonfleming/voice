@@ -1,5 +1,5 @@
 /*
-* Sketch_09_3_Record_And_Play.ino
+* Sketch_09_3_Reird_And_Play.ino
 * This sketch records audio data from an audio input using the I2S bus and saves it as a WAV file on an SD card.
 * It also plays back the recorded audio files using the same I2S bus.
 * The recording and playback are controlled by a button press.
@@ -10,20 +10,15 @@
 #include "driver_audio_input.h"
 #include "driver_audio_output.h"
 #include "driver_button.h"
-#include "driver_sdmmc.h"
 #include <esp_heap_caps.h>
 // WiFi + HTTP
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-// Define the folder path for recording files
-#define RECORDER_FOLDER "/recorder"
+#define RECORDER_FOLDER ""
 // Define the pin number for the button (do not modify)
 #define BUTTON_PIN 19         
-// Define the pin numbers for SDMMC interface (do not modify)
-#define SD_MMC_CMD 38         
-#define SD_MMC_CLK 39         
-#define SD_MMC_D0 40          
+// (SD card support removed)
 // Define the pin numbers for audio input (do not modify)
 #define AUDIO_INPUT_SCK 3     
 #define AUDIO_INPUT_WS 14     
@@ -35,6 +30,9 @@
 
 // Define the size of PSRAM in bytes
 #define MOLLOC_SIZE (1024 * 1024)
+
+// Set to 1 to save recordings to SD card, 0 to keep in-memory and avoid SD writes
+#define SAVE_TO_SD 0
 
 // ---------- WiFi / Server configuration (edit before upload) ----------
 #define WIFI_SSID "FLEMING_2"
@@ -62,6 +60,8 @@ int recorder_task_flag = 0;
 int player_task_flag = 0;        
 // Save wav data
 uint8_t *wav_buffer;
+// Size of the last recorded buffer stored in PSRAM
+size_t last_recorded_size = 0;
 
 // Setup function to initialize the hardware and software components
 void setup() {
@@ -79,12 +79,8 @@ void setup() {
   // Initialize the I2S bus for audio output
   i2s_output_init(AUDIO_OUTPUT_BCLK, AUDIO_OUTPUT_LRC, AUDIO_OUTPUT_DOUT);
 
-  // Initialize the SD card
-  sdmmc_init(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
-  // Remove the existing recorder folder if it exists
-  remove_dir(RECORDER_FOLDER);
-  // Create a new recorder folder
-  create_dir(RECORDER_FOLDER);
+  // SD card support removed: using PSRAM-only recording
+  Serial.println("SD card support disabled; using PSRAM-only buffers.");
 
   // Connect to WiFi (used for HTTP requests)
   wifi_connect();
@@ -356,6 +352,16 @@ void send_text_to_piper(const String &text) {
       int audio_len = http.getSize();
       size_t bytes_read = 0;
 
+      // Ensure wav_buffer is allocated before attempting to read streamed audio into it
+      if (wav_buffer == NULL) {
+        wav_buffer = (uint8_t *)heap_caps_malloc(MOLLOC_SIZE, MALLOC_CAP_SPIRAM);
+        if (wav_buffer == NULL) {
+          Serial.println("ERROR: failed to allocate PSRAM buffer for TTS playback.");
+          http.end();
+          return;
+        }
+      }
+
       if (audio_len > 0 && audio_len <= MOLLOC_SIZE) {
         bytes_read = client->readBytes(wav_buffer, audio_len);
       } else {
@@ -363,9 +369,12 @@ void send_text_to_piper(const String &text) {
         size_t to_read = 0;
         while (client->connected() || client->available()) {
           if (client->available()) {
-            int chunk = client->readBytes(wav_buffer + to_read, 1024);
+            size_t remaining = MOLLOC_SIZE - to_read;
+            if (remaining == 0) break;
+            size_t want = remaining > 1024 ? 1024 : remaining;
+            int chunk = client->readBytes((char*)wav_buffer + to_read, (size_t)want);
             if (chunk <= 0) break;
-            to_read += chunk;
+            to_read += (size_t)chunk;
             if (to_read >= MOLLOC_SIZE) break;
           } else {
             delay(5);
@@ -408,9 +417,12 @@ void send_text_to_piper(const String &text) {
         unsigned long start_ms = millis();
         while (clientDbg->connected() || clientDbg->available()) {
           if (clientDbg->available()) {
-            int chunk = clientDbg->readBytes((char*)wav_buffer + to_read, 1024);
+            size_t remaining = MOLLOC_SIZE - to_read;
+            if (remaining == 0) break;
+            size_t want = remaining > 1024 ? 1024 : remaining;
+            int chunk = clientDbg->readBytes((char*)wav_buffer + to_read, (size_t)want);
             if (chunk <= 0) break;
-            to_read += chunk;
+            to_read += (size_t)chunk;
             if (to_read >= MOLLOC_SIZE) break;
           } else {
             if (millis() - start_ms > 5000) break; // timeout waiting for data
@@ -649,11 +661,7 @@ void loop_task_sound_recorder(void *pvParameters) {
   }
   wav_buffer = (uint8_t *)heap_caps_malloc(MOLLOC_SIZE, MALLOC_CAP_SPIRAM);
 
-  // Get the index for the next recording file
-  int wav_index = read_file_num(RECORDER_FOLDER);
-  // Generate the file name for the new recording
-  String file_name = String(RECORDER_FOLDER) + "/recording_" + String(wav_index) + ".wav";
-  Serial.printf("file_name:%s\r\n", file_name.c_str());
+  // No filesystem: record directly into PSRAM buffer
 
   // Loop while the recorder task is running
   while (recorder_task_flag == 1) {
@@ -675,12 +683,10 @@ void loop_task_sound_recorder(void *pvParameters) {
       iis_buffer_size -= real_size;
     }
   }
-  // Write the WAV header to the file
-  bool state = write_wav_header(file_name.c_str(), total_size);
-  Serial.printf("Write wav header state2:%d\r\n", state);
-
-  // Append the recorded data to the file
-  append_file(file_name.c_str(), wav_buffer, total_size);
+  // Write the WAV header to the file and append data only when saving to SD
+  // Save the final recorded size for in-memory playback and downstream processing
+  last_recorded_size = total_size;
+  Serial.printf("Recorded bytes in PSRAM: %u\r\n", (unsigned)last_recorded_size);
   
   Serial.printf("write wav size:%d\r\n", total_size);
   // Stream the recorded WAV (header + PSRAM buffer) to the transcription server
@@ -725,28 +731,14 @@ void loop_task_play_handle(void *pvParameters) {
   Serial.println("loop_task_play_handle start...");
   // Loop while the player task is running
   while (player_task_flag == 1) {
-      // Get the number of recorded files
-      int file_count = read_file_num(RECORDER_FOLDER);
-      // Generate the file name for the last recorded file
-      String file_name = String(RECORDER_FOLDER) + String("/") + String(get_file_name_by_index(RECORDER_FOLDER, (file_count - 1)));
-      size_t length = read_file_size(file_name.c_str());
-      Serial.printf("file_name:%s, size:%d\r\n", file_name.c_str(), length);
-      if(wav_buffer!=NULL)
-      {
-        // Free the allocated memory in PSRAM
-        heap_caps_free(wav_buffer);
-        wav_buffer = NULL;
+      // Play the last in-memory recording (PSRAM)
+      if (wav_buffer != NULL && last_recorded_size > 0) {
+        Serial.printf("Playing in-memory recording, size=%u\r\n", (unsigned)last_recorded_size);
+        i2s_output_wav(wav_buffer, last_recorded_size);
+      } else {
+        Serial.println("No in-memory recording available to play.");
       }
-      wav_buffer = (uint8_t *)heap_caps_malloc(MOLLOC_SIZE, MALLOC_CAP_SPIRAM);
-      read_file(file_name.c_str(), wav_buffer, length);
-      i2s_output_wav(wav_buffer, length);
-      // for(size_t i=0;i<44;i++)
-      // {
-      //   Serial.printf("0x%x ",wav_buffer[i]);
-      //   if(i%4==3)
-      //     Serial.println();
-      // }
-      player_task_flag=0;
+      player_task_flag = 0;
   }
   // Print a message indicating the end of the player task
   Serial.println("loop_task_play_handle stop...");
