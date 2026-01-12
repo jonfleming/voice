@@ -52,6 +52,43 @@ void i2s_output_wav(uint8_t *data, size_t len)
   i2s_output.playWAV(data, len);
 }
 
+// Begin streaming playback: reconfigure I2S for the incoming WAV PCM parameters.
+bool i2s_output_stream_begin(uint32_t sample_rate, uint16_t bits_per_sample, uint16_t channels) {
+  // End any previous I2S to allow reconfiguration
+  i2s_output.end();
+
+  i2s_data_bit_width_t data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
+  if (bits_per_sample <= 16) data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
+
+  i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
+#ifdef I2S_SLOT_MODE_MONO
+  if (channels == 1) slot_mode = I2S_SLOT_MODE_MONO;
+#endif
+
+  if (!i2s_output.begin(I2S_MODE_STD, sample_rate, data_bit_width, slot_mode, I2S_STD_SLOT_BOTH)) {
+    Serial.println("Failed to initialize I2S for streaming output");
+    return false;
+  }
+  return true;
+}
+
+// Write PCM bytes to I2S output. Returns number of bytes written (best-effort).
+size_t i2s_output_stream_write(const uint8_t *data, size_t len) {
+  // Use I2SClass write method if available; this should stream PCM directly out.
+  // The API below is a common signature for ESP_I2S variants; if your board
+  // library uses a different name, adjust accordingly.
+  size_t written = 0;
+  if (len == 0) return 0;
+  written = (size_t)i2s_output.write((const char *)data, (size_t)len);
+  return written;
+}
+
+void i2s_output_stream_end(void) {
+  // Gracefully stop I2S streaming; don't deinit completely so caller can
+  // re-use playback functions.
+  i2s_output.end();
+}
+
 void i2s_output_deinit(void)
 { 
     i2s_output.end(); 

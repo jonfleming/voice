@@ -341,67 +341,89 @@ void send_text_to_piper(const String &text) {
     int contentLenReported = http.getSize();
     Serial.printf("Response headers: Content-Type='%s', Content-Length(header)='%s', getSize()=%d\r\n",
       contentType.c_str(), headerContentLength.c_str(), contentLenReported);
-    // Normalize header check
-    if (contentType.length() == 0) {
-      Serial.println("Warning: Content-Type header is empty from Piper.");
-    }
 
     if (contentType.indexOf("audio/") == 0 || contentType.indexOf("audio") >= 0) {
-      // Read raw audio bytes from the stream
+      // Stream audio: parse WAV header when it arrives, configure I2S, then feed PCM chunks to I2S.
       WiFiClient *client = http.getStreamPtr();
-      int audio_len = http.getSize();
-      size_t bytes_read = 0;
-
-      // Ensure wav_buffer is allocated before attempting to read streamed audio into it
-      if (wav_buffer == NULL) {
-        wav_buffer = (uint8_t *)heap_caps_malloc(MOLLOC_SIZE, MALLOC_CAP_SPIRAM);
-        if (wav_buffer == NULL) {
-          Serial.println("ERROR: failed to allocate PSRAM buffer for TTS playback.");
-          http.end();
-          return;
-        }
+      if (!client) {
+        Serial.println("No stream pointer available for TTS audio.");
+        http.end();
+        return;
       }
 
-      if (audio_len > 0 && audio_len <= MOLLOC_SIZE) {
-        bytes_read = client->readBytes(wav_buffer, audio_len);
-      } else {
-        // Unknown size or larger than buffer: stream up to MOLLOC_SIZE
-        size_t to_read = 0;
-        while (client->connected() || client->available()) {
-          if (client->available()) {
-            size_t remaining = MOLLOC_SIZE - to_read;
-            if (remaining == 0) break;
-            size_t want = remaining > 1024 ? 1024 : remaining;
-            int chunk = client->readBytes((char*)wav_buffer + to_read, (size_t)want);
-            if (chunk <= 0) break;
-            to_read += (size_t)chunk;
-            if (to_read >= MOLLOC_SIZE) break;
+      const size_t CHUNK = 1024;
+      uint8_t *stream_buf = (uint8_t *)malloc(CHUNK);
+      if (!stream_buf) {
+        Serial.println("Failed to allocate streaming buffer");
+        http.end();
+        return;
+      }
+
+      uint8_t header_tmp[44];
+      size_t header_pos = 0;
+      bool header_parsed = false;
+      uint32_t sample_rate = 32000;
+      uint16_t channels = 2;
+      uint16_t bits_per_sample = 32;
+
+      unsigned long start_ms = millis();
+      while (client->connected() || client->available()) {
+        if (client->available()) {
+          int r = client->readBytes((char *)stream_buf, CHUNK);
+          if (r <= 0) break;
+
+          size_t p = 0;
+          if (!header_parsed) {
+            // Accumulate header bytes
+            size_t need = 44 - header_pos;
+            size_t take = (r < (int)need) ? r : need;
+            memcpy(header_tmp + header_pos, stream_buf, take);
+            header_pos += take;
+            p += take;
+
+            if (header_pos >= 44) {
+              // Parse WAV header
+              if (header_tmp[0] == 'R' && header_tmp[1] == 'I' && header_tmp[2] == 'F' && header_tmp[3] == 'F') {
+                sample_rate = (uint32_t)header_tmp[24] | ((uint32_t)header_tmp[25] << 8) | ((uint32_t)header_tmp[26] << 16) | ((uint32_t)header_tmp[27] << 24);
+                channels = (uint16_t)header_tmp[22] | ((uint16_t)header_tmp[23] << 8);
+                bits_per_sample = (uint16_t)header_tmp[34] | ((uint16_t)header_tmp[35] << 8);
+                Serial.printf("Parsed WAV header: sr=%u ch=%u bps=%u\r\n", sample_rate, channels, bits_per_sample);
+                if (!i2s_output_stream_begin(sample_rate, bits_per_sample, channels)) {
+                  Serial.println("Failed to begin I2S streaming for TTS audio");
+                  break;
+                }
+                header_parsed = true;
+                // If there are remaining bytes in this chunk, write them as PCM
+                if (r - (int)p > 0) {
+                  i2s_output_stream_write(stream_buf + p, r - (int)p);
+                }
+              } else {
+                Serial.println("Response did not contain a valid WAV header; aborting streaming playback.");
+                break;
+              }
+            }
           } else {
-            delay(5);
+            // Header already parsed: write PCM directly
+            i2s_output_stream_write(stream_buf, r);
+          }
+          start_ms = millis();
+        } else {
+          // no data available right now; give CPU to other tasks
+          delay(2);
+          if (millis() - start_ms > 30000) {
+            Serial.println("Timeout waiting for streaming audio data");
+            break;
           }
         }
-        bytes_read = to_read;
       }
 
-      if (bytes_read > 0) {
-        Serial.printf("Received TTS audio bytes: %d\r\n", bytes_read);
-        // Dump first bytes for debugging
-        int dump_n = bytes_read < 64 ? bytes_read : 64;
-        Serial.print("First "); Serial.print(dump_n); Serial.println(" bytes (hex):");
-        for (int i = 0; i < dump_n; ++i) {
-          Serial.printf("%02x ", wav_buffer[i]);
-        }
-        Serial.println();
-        Serial.println("First bytes (ASCII, non-printable shown as '.'):");
-        for (int i = 0; i < dump_n; ++i) {
-          char c = (char)wav_buffer[i];
-          if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.');
-        }
-        Serial.println();
-
-        i2s_output_wav(wav_buffer, bytes_read);
+      free(stream_buf);
+      if (header_parsed) {
+        // Give a small time for the output buffer to drain then end stream
+        delay(20);
+        i2s_output_stream_end();
       } else {
-        Serial.println("No TTS audio received or failed to read audio.");
+        Serial.println("No streaming audio played (header not parsed)");
       }
     } else if (contentType.indexOf("application/json") >= 0) {
       String payload = http.getString();
@@ -409,53 +431,6 @@ void send_text_to_piper(const String &text) {
       Serial.println(payload);
     } else {
       Serial.printf("Unexpected Content-Type from TTS: %s\r\n", contentType.c_str());
-      // For debugging and fallback: read the entire response stream into wav_buffer
-      WiFiClient *clientDbg = http.getStreamPtr();
-      if (clientDbg) {
-        Serial.printf("Stream pointer available. client->available()=%d\r\n", clientDbg->available());
-        size_t to_read = 0;
-        unsigned long start_ms = millis();
-        while (clientDbg->connected() || clientDbg->available()) {
-          if (clientDbg->available()) {
-            size_t remaining = MOLLOC_SIZE - to_read;
-            if (remaining == 0) break;
-            size_t want = remaining > 1024 ? 1024 : remaining;
-            int chunk = clientDbg->readBytes((char*)wav_buffer + to_read, (size_t)want);
-            if (chunk <= 0) break;
-            to_read += (size_t)chunk;
-            if (to_read >= MOLLOC_SIZE) break;
-          } else {
-            if (millis() - start_ms > 5000) break; // timeout waiting for data
-            delay(5);
-          }
-        }
-        Serial.printf("Read %u bytes for debug dump\r\n", (unsigned)to_read);
-
-        if (to_read >= 4 && wav_buffer[0] == 'R' && wav_buffer[1] == 'I' && wav_buffer[2] == 'F' && wav_buffer[3] == 'F') {
-          Serial.println("Detected RIFF header in response — treating as WAV audio.");
-          int dump_n = to_read < 64 ? to_read : 64;
-          Serial.print("First "); Serial.print(dump_n); Serial.println(" bytes (hex):");
-          for (int i = 0; i < dump_n; ++i) Serial.printf("%02x ", wav_buffer[i]);
-          Serial.println();
-          Serial.println("First bytes (ASCII, non-printable shown as '.'):");
-          for (int i = 0; i < dump_n; ++i) { char c = (char)wav_buffer[i]; if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.'); }
-          Serial.println();
-          i2s_output_wav(wav_buffer, to_read);
-        } else if (to_read > 0) {
-          // Fallback: show a shorter debug dump
-          int dump_n = to_read < 128 ? to_read : 128;
-          Serial.println("Debug dump (hex):");
-          for (int i = 0; i < dump_n; ++i) Serial.printf("%02x ", wav_buffer[i]);
-          Serial.println();
-          Serial.println("Debug dump (ASCII):");
-          for (int i = 0; i < dump_n; ++i) { char c = (char)wav_buffer[i]; if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.'); }
-          Serial.println();
-        } else {
-          Serial.println("No bytes available on stream for debug dump.");
-        }
-      } else {
-        Serial.println("No stream pointer available for debug dump.");
-      }
     }
   } else {
     Serial.printf("Piper POST failed, error: %s\r\n", http.errorToString(code).c_str());

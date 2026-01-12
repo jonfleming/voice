@@ -9,6 +9,12 @@ bool i2s_output_init(int bclk, int lrc, int dout);
 void i2s_output_wav(uint8_t *data, size_t len);
 void i2s_output_deinit(void);
 
+// Streaming API: begin a streaming session (configure I2S to WAV params),
+// write PCM bytes incrementally, and end the streaming session.
+bool i2s_output_stream_begin(uint32_t sample_rate, uint16_t bits_per_sample, uint16_t channels);
+size_t i2s_output_stream_write(const uint8_t *data, size_t len);
+void i2s_output_stream_end(void);
+
 int audio_output_init(int bclk, int lrc, int dout);
 void audio_output_set_volume(int volume);
 int audio_read_output_volume(void);
