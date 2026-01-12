@@ -353,13 +353,14 @@ void send_text_to_piper(const String &text) {
 
       const size_t CHUNK = 1024;
       uint8_t *stream_buf = (uint8_t *)malloc(CHUNK);
+      uint8_t *convert_buf = NULL; // allocated on-demand for mono->stereo conversion
       if (!stream_buf) {
         Serial.println("Failed to allocate streaming buffer");
         http.end();
         return;
       }
 
-      uint8_t header_tmp[44];
+      uint8_t header_tmp[1024];
       size_t header_pos = 0;
       bool header_parsed = false;
       uint32_t sample_rate = 32000;
@@ -374,37 +375,119 @@ void send_text_to_piper(const String &text) {
 
           size_t p = 0;
           if (!header_parsed) {
-            // Accumulate header bytes
-            size_t need = 44 - header_pos;
+            // Accumulate header bytes (allow larger headers with extra fmt fields)
+            size_t need = sizeof(header_tmp) - header_pos;
             size_t take = (r < (int)need) ? r : need;
             memcpy(header_tmp + header_pos, stream_buf, take);
             header_pos += take;
             p += take;
 
+            // Try parsing when we have at least 44 bytes; continue collecting if parse fails
             if (header_pos >= 44) {
-              // Parse WAV header
+              // Robust WAV parser: search for 'RIFF'/'WAVE' and then iterate chunks to find 'fmt '
+              bool ok = false;
+              size_t off = 0;
               if (header_tmp[0] == 'R' && header_tmp[1] == 'I' && header_tmp[2] == 'F' && header_tmp[3] == 'F') {
-                sample_rate = (uint32_t)header_tmp[24] | ((uint32_t)header_tmp[25] << 8) | ((uint32_t)header_tmp[26] << 16) | ((uint32_t)header_tmp[27] << 24);
-                channels = (uint16_t)header_tmp[22] | ((uint16_t)header_tmp[23] << 8);
-                bits_per_sample = (uint16_t)header_tmp[34] | ((uint16_t)header_tmp[35] << 8);
+                // iterate chunks
+                off = 12;
+                while (off + 8 <= header_pos) {
+                  const char *cid = (const char *)(header_tmp + off);
+                  uint32_t csize = (uint32_t)header_tmp[off+4] | ((uint32_t)header_tmp[off+5] << 8) | ((uint32_t)header_tmp[off+6] << 16) | ((uint32_t)header_tmp[off+7] << 24);
+                  size_t chunk_data = off + 8;
+                  if (chunk_data + csize > header_pos) break; // not enough bytes yet
+                  if (cid[0]=='f' && cid[1]=='m' && cid[2]=='t' && cid[3]==' ') {
+                    if (csize >= 16) {
+                      channels = (uint16_t)header_tmp[chunk_data+2] | ((uint16_t)header_tmp[chunk_data+3] << 8);
+                      sample_rate = (uint32_t)header_tmp[chunk_data+4] | ((uint32_t)header_tmp[chunk_data+5] << 8) | ((uint32_t)header_tmp[chunk_data+6] << 16) | ((uint32_t)header_tmp[chunk_data+7] << 24);
+                      bits_per_sample = (uint16_t)header_tmp[chunk_data+14] | ((uint16_t)header_tmp[chunk_data+15] << 8);
+                      ok = true;
+                    }
+                  }
+                  off = chunk_data + csize;
+                  if (csize & 1) off++;
+                }
+              }
+
+              if (ok) {
                 Serial.printf("Parsed WAV header: sr=%u ch=%u bps=%u\r\n", sample_rate, channels, bits_per_sample);
                 if (!i2s_output_stream_begin(sample_rate, bits_per_sample, channels)) {
                   Serial.println("Failed to begin I2S streaming for TTS audio");
                   break;
                 }
                 header_parsed = true;
-                // If there are remaining bytes in this chunk, write them as PCM
+                // If there are remaining bytes in the accumulated header after the header offset,
+                // locate where 'data' chunk starts to compute the correct PCM start point. As a
+                // pragmatic fallback, write all remaining bytes after the whole header buffer.
+                // If the current chunk contained PCM after the fmt chunk, write leftover bytes.
+                if (header_pos > off) {
+                  size_t leftover = header_pos - off;
+                  // If the audio is mono but I2S is stereo by configuration, duplicate samples
+                  if (channels == 1 && bits_per_sample > 0) {
+                    size_t sample_bytes = (bits_per_sample + 7) / 8;
+                    size_t samples = leftover / sample_bytes;
+                    size_t out_bytes = samples * sample_bytes * 2;
+                    if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                    uint8_t *outp = convert_buf;
+                    uint8_t *inp = header_tmp + off;
+                    for (size_t si = 0; si < samples; ++si) {
+                      // copy sample
+                      memcpy(outp, inp, sample_bytes);
+                      outp += sample_bytes;
+                      memcpy(outp, inp, sample_bytes);
+                      outp += sample_bytes;
+                      inp += sample_bytes;
+                    }
+                    i2s_output_stream_write(convert_buf, out_bytes);
+                  } else {
+                    i2s_output_stream_write(header_tmp + off, leftover);
+                  }
+                }
+                // Also write any remaining bytes from this network read beyond what we consumed
                 if (r - (int)p > 0) {
-                  i2s_output_stream_write(stream_buf + p, r - (int)p);
+                  size_t have = r - (int)p;
+                  if (channels == 1 && bits_per_sample > 0) {
+                    size_t sample_bytes = (bits_per_sample + 7) / 8;
+                    size_t samples = have / sample_bytes;
+                    size_t out_bytes = samples * sample_bytes * 2;
+                    if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                    uint8_t *outp = convert_buf;
+                    uint8_t *inp = stream_buf + p;
+                    for (size_t si = 0; si < samples; ++si) {
+                      memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                      memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                      inp += sample_bytes;
+                    }
+                    i2s_output_stream_write(convert_buf, out_bytes);
+                  } else {
+                    i2s_output_stream_write(stream_buf + p, have);
+                  }
                 }
               } else {
-                Serial.println("Response did not contain a valid WAV header; aborting streaming playback.");
-                break;
-              }
+                  // not enough header bytes to parse fmt/data yet; continue collecting
+                  if (header_pos >= sizeof(header_tmp)) {
+                    Serial.println("Header too large or malformed; aborting streaming playback.");
+                    break;
+                  }
+                }
             }
           } else {
             // Header already parsed: write PCM directly
-            i2s_output_stream_write(stream_buf, r);
+              if (channels == 1 && bits_per_sample > 0) {
+                size_t sample_bytes = (bits_per_sample + 7) / 8;
+                size_t samples = r / sample_bytes;
+                size_t out_bytes = samples * sample_bytes * 2;
+                if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                uint8_t *outp = convert_buf;
+                uint8_t *inp = stream_buf;
+                for (size_t si = 0; si < samples; ++si) {
+                  memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                  memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                  inp += sample_bytes;
+                }
+                i2s_output_stream_write(convert_buf, out_bytes);
+              } else {
+                i2s_output_stream_write(stream_buf, r);
+              }
           }
           start_ms = millis();
         } else {
@@ -417,6 +500,7 @@ void send_text_to_piper(const String &text) {
         }
       }
 
+      if (convert_buf) free(convert_buf);
       free(stream_buf);
       if (header_parsed) {
         // Give a small time for the output buffer to drain then end stream

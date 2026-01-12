@@ -19,13 +19,36 @@ bool i2s_output_init(int bclk, int lrc, int dout) {
 void i2s_output_wav(uint8_t *data, size_t len)
 {
   // Inspect WAV header (if present) and reconfigure I2S to match sample rate / bit depth / channels
-  if (len >= 44 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F') {
-    // little-endian sample rate at offset 24
-    uint32_t sample_rate = (uint32_t)data[24] | ((uint32_t)data[25] << 8) | ((uint32_t)data[26] << 16) | ((uint32_t)data[27] << 24);
-    uint16_t channels = (uint16_t)data[22] | ((uint16_t)data[23] << 8);
-    uint16_t bits_per_sample = (uint16_t)data[34] | ((uint16_t)data[35] << 8);
+  // Use a robust chunk-based parser to handle non-standard fmt chunk sizes.
+  if (len >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F' && data[8] == 'W' && data[9] == 'A' && data[10] == 'V' && data[11] == 'E') {
+    uint32_t sample_rate = 32000;
+    uint16_t channels = 2;
+    uint16_t bits_per_sample = 32;
 
-    Serial.printf("WAV header: sample_rate=%u, channels=%u, bits_per_sample=%u\r\n", sample_rate, channels, bits_per_sample);
+    // Parse chunks starting at offset 12
+    size_t offset = 12;
+    while (offset + 8 <= len) {
+      // read chunk id and size
+      const char *cid = (const char *)(data + offset);
+      uint32_t csize = (uint32_t)data[offset+4] | ((uint32_t)data[offset+5] << 8) | ((uint32_t)data[offset+6] << 16) | ((uint32_t)data[offset+7] << 24);
+      size_t chunk_data = offset + 8;
+      if (chunk_data + csize > len) break; // not enough data available
+
+      if (cid[0]=='f' && cid[1]=='m' && cid[2]=='t' && cid[3]==' ') {
+        // fmt chunk: parse common fields if present
+        if (csize >= 16) {
+          channels = (uint16_t)data[chunk_data+2] | ((uint16_t)data[chunk_data+3] << 8);
+          sample_rate = (uint32_t)data[chunk_data+4] | ((uint32_t)data[chunk_data+5] << 8) | ((uint32_t)data[chunk_data+6] << 16) | ((uint32_t)data[chunk_data+7] << 24);
+          bits_per_sample = (uint16_t)data[chunk_data+14] | ((uint16_t)data[chunk_data+15] << 8);
+        }
+      }
+
+      offset = chunk_data + csize;
+      // chunk sizes are word-aligned to even bytes
+      if (csize & 1) offset++;
+    }
+
+    Serial.printf("WAV header (parsed): sample_rate=%u, channels=%u, bits_per_sample=%u\r\n", sample_rate, channels, bits_per_sample);
 
     // Choose data bit width enum
     i2s_data_bit_width_t data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
@@ -33,12 +56,11 @@ void i2s_output_wav(uint8_t *data, size_t len)
 
     // Choose slot mode (mono/stereo)
     i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
-    // Some ESP_I2S variants support mono slot mode constant; try to use mono if available
-  #ifdef I2S_SLOT_MODE_MONO
+#ifdef I2S_SLOT_MODE_MONO
     if (channels == 1) slot_mode = I2S_SLOT_MODE_MONO;
-  #else
+#else
     (void)channels; // silence unused variable when mono constant not defined
-  #endif
+#endif
 
     // Reinitialize I2S with WAV parameters. End first to allow reconfiguration.
     i2s_output.end();
@@ -79,7 +101,9 @@ size_t i2s_output_stream_write(const uint8_t *data, size_t len) {
   // library uses a different name, adjust accordingly.
   size_t written = 0;
   if (len == 0) return 0;
-  written = (size_t)i2s_output.write((const char *)data, (size_t)len);
+  // `I2SClass::write` expects a non-const `uint8_t*` buffer. Cast away const
+  // here because the I2S write will not modify the provided buffer.
+  written = (size_t)i2s_output.write((uint8_t *)data, (size_t)len);
   return written;
 }
 
