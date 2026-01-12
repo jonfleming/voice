@@ -1,6 +1,5 @@
 
 #include "driver_audio_output.h"
-#include "SD_MMC.h"
 #include "Audio.h"
 #include <ESP_I2S.h>
 
@@ -133,11 +132,6 @@ void audio_output_set_volume(int volume) {
 //Query volume
 int audio_read_output_volume(void) {
   return audio.getVolume();
-}
-
-//load the mp3
-void audio_output_load_music(const char *name) {
-  audio.connecttoFS(SD_MMC, name);
 }
 
 //Pause/play the music

@@ -14,6 +14,11 @@
 // WiFi + HTTP
 #include <WiFi.h>
 #include <HTTPClient.h>
+// Display
+#include "display.h"
+#include <lvgl.h>
+#define TFT_BL_PIN 20
+Display screen;
 
 #define RECORDER_FOLDER ""
 // Define the pin number for the button (do not modify)
@@ -51,8 +56,8 @@
 #define PIPER_MODEL "speaches-ai/Kokoro-82M-v1.0-ONNX"
 #define PIPER_VOICE "af_heart"
 
-// Create a button object with the specified pin
-Button button(BUTTON_PIN);
+// Global button instance is declared in `driver_button.h` and defined in `display.cpp`.
+// Use the shared `button` instance (defined in display.cpp) via the extern declaration.
 
 // Flag to indicate the status of the recorder task (0=stopped, 1=running)
 int recorder_task_flag = 0;       
@@ -71,6 +76,9 @@ void setup() {
   while (!Serial) {
     delay(10);
   }
+  // Display
+  screen.init(TFT_DIRECTION);
+  
   // Initialize the button
   button.init();
 
