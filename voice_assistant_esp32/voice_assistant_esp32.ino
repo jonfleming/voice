@@ -48,6 +48,10 @@
 
 // Default STT model name (sent as form field `model`)
 #define STT_MODEL "Systran/faster-distil-whisper-small.en"
+// Ollama model to use for generation (change as needed)
+#define OLLAMA_MODEL "llama3.2"
+#define PIPER_MODEL "speaches-ai/Kokoro-82M-v1.0-ONNX"
+#define PIPER_VOICE "af_heart"
 
 // Create a button object with the specified pin
 Button button(BUTTON_PIN);
@@ -217,6 +221,236 @@ String extract_json_string_value(const String &json, const String &key) {
   return out;
 }
 
+// Extract all occurrences of a string field (useful for streaming JSON lines)
+String extract_all_json_string_values(const String &json, const String &key) {
+  String out = "";
+  String needle = String("\"") + key + String("\"") + String(":");
+  int start = 0;
+  while (true) {
+    int idx = json.indexOf(needle, start);
+    if (idx < 0) break;
+    // move to first quote after ':'
+    int q = json.indexOf('"', idx + needle.length());
+    if (q < 0) break;
+    int q2 = q + 1;
+    while (q2 < json.length()) {
+      char c = json[q2];
+      if (c == '"') break;
+      if (c == '\\' && q2 + 1 < json.length()) {
+        char esc = json[q2 + 1];
+        if (esc == '"') out += '"';
+        else if (esc == 'n') out += '\n';
+        else if (esc == 'r') out += '\r';
+        else if (esc == 't') out += '\t';
+        else out += esc;
+        q2 += 2;
+        continue;
+      }
+      out += c;
+      q2++;
+    }
+    // advance search position
+    start = q2 + 1;
+  }
+  return out;
+}
+
+// Minimal JSON string escaper for safe embedding in request bodies
+String json_escape(const String &s) {
+  String out = "";
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (c == '"') out += "\\\"";
+    else if (c == '\\') out += "\\\\";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+// Send the transcription text to the Ollama server and print the response
+void send_transcription_to_ollama(const String &text) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Not connected to WiFi, cannot send to Ollama");
+    return;
+  }
+  HTTPClient http;
+  String url = String("http://") + SERVER_IP + ":" + String(OLLAMA_PORT) + "/api/generate";
+  Serial.printf("POST %s\r\n", url.c_str());
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  String body = String("{\"model\":\"") + OLLAMA_MODEL + String("\",\"prompt\":\"") + json_escape(text) + String("\"}");
+
+  int code = http.POST(body);
+  if (code > 0) {
+    Serial.printf("Ollama HTTP code: %d\r\n", code);
+    String resp = http.getString();
+    Serial.println("Ollama response:");
+    Serial.println(resp);
+    // Try to extract a usable text response from Ollama JSON.
+    // Ollama may stream many small JSON objects; aggregate any "response" fields.
+    String ai_text = extract_all_json_string_values(resp, "response");
+    if (ai_text.length() == 0) ai_text = extract_all_json_string_values(resp, "content");
+    if (ai_text.length() == 0) ai_text = extract_json_string_value(resp, "text");
+    ai_text.trim();
+    if (ai_text.length() > 0) {
+      Serial.println("Parsed AI output:");
+      Serial.println(ai_text);
+      // Send parsed AI text to Piper for TTS
+      send_text_to_piper(ai_text);
+    } else {
+      Serial.println("Could not parse AI text from Ollama response.");
+    }
+  } else {
+    Serial.printf("Ollama POST failed, error: %s\r\n", http.errorToString(code).c_str());
+  }
+  http.end();
+}
+
+// Send text to Piper (Wyoming Piper compatible) for TTS and play the returned WAV
+void send_text_to_piper(const String &text) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Not connected to WiFi for TTS.");
+    return;
+  }
+
+  HTTPClient http;
+  String url = String("http://") + SERVER_IP + ":" + String(PIPER_PORT) + "/v1/audio/speech";
+  Serial.printf("POST %s\r\n", url.c_str());
+  http.begin(url);
+  // Ask HTTPClient to collect these response headers so http.header() works after the request
+  const char* responseHeaders[] = { "Content-Type", "Content-Length" };
+  http.collectHeaders(responseHeaders, 2);
+  http.addHeader("Content-Type", "application/json");
+
+  // Lightweight defaults — change model/voice as needed
+  String tts_model = PIPER_MODEL;
+  String tts_voice = PIPER_VOICE;
+
+  String body = String("{\"model\":\"") + tts_model + String("\",\"voice\":\"") + tts_voice + String("\",\"input\":\"") + json_escape(text) + String("\",\"response_format\":\"wav\"}");
+
+  // For debugging, print first 50 character of text
+  String text50 = text.length() > 50 ? text.substring(0, 50) + "..." : text;
+  String debugBody = String("{\"model\":\"") + tts_model + String("\",\"voice\":\"") + tts_voice + String("\",\"input\":\"") + json_escape(text50) + String("\",\"response_format\":\"wav\"}");
+  Serial.printf("TTS request body (truncated): %s\r\n", debugBody.c_str());
+
+  int code = http.POST(body);
+  if (code > 0) {
+    Serial.printf("Piper HTTP code: %d\r\n", code);
+    String contentType = http.header("Content-Type");
+    String headerContentLength = http.header("Content-Length");
+    int contentLenReported = http.getSize();
+    Serial.printf("Response headers: Content-Type='%s', Content-Length(header)='%s', getSize()=%d\r\n",
+      contentType.c_str(), headerContentLength.c_str(), contentLenReported);
+    // Normalize header check
+    if (contentType.length() == 0) {
+      Serial.println("Warning: Content-Type header is empty from Piper.");
+    }
+
+    if (contentType.indexOf("audio/") == 0 || contentType.indexOf("audio") >= 0) {
+      // Read raw audio bytes from the stream
+      WiFiClient *client = http.getStreamPtr();
+      int audio_len = http.getSize();
+      size_t bytes_read = 0;
+
+      if (audio_len > 0 && audio_len <= MOLLOC_SIZE) {
+        bytes_read = client->readBytes(wav_buffer, audio_len);
+      } else {
+        // Unknown size or larger than buffer: stream up to MOLLOC_SIZE
+        size_t to_read = 0;
+        while (client->connected() || client->available()) {
+          if (client->available()) {
+            int chunk = client->readBytes(wav_buffer + to_read, 1024);
+            if (chunk <= 0) break;
+            to_read += chunk;
+            if (to_read >= MOLLOC_SIZE) break;
+          } else {
+            delay(5);
+          }
+        }
+        bytes_read = to_read;
+      }
+
+      if (bytes_read > 0) {
+        Serial.printf("Received TTS audio bytes: %d\r\n", bytes_read);
+        // Dump first bytes for debugging
+        int dump_n = bytes_read < 64 ? bytes_read : 64;
+        Serial.print("First "); Serial.print(dump_n); Serial.println(" bytes (hex):");
+        for (int i = 0; i < dump_n; ++i) {
+          Serial.printf("%02x ", wav_buffer[i]);
+        }
+        Serial.println();
+        Serial.println("First bytes (ASCII, non-printable shown as '.'):");
+        for (int i = 0; i < dump_n; ++i) {
+          char c = (char)wav_buffer[i];
+          if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.');
+        }
+        Serial.println();
+
+        i2s_output_wav(wav_buffer, bytes_read);
+      } else {
+        Serial.println("No TTS audio received or failed to read audio.");
+      }
+    } else if (contentType.indexOf("application/json") >= 0) {
+      String payload = http.getString();
+      Serial.println("TTS returned JSON instead of audio: ");
+      Serial.println(payload);
+    } else {
+      Serial.printf("Unexpected Content-Type from TTS: %s\r\n", contentType.c_str());
+      // For debugging and fallback: read the entire response stream into wav_buffer
+      WiFiClient *clientDbg = http.getStreamPtr();
+      if (clientDbg) {
+        Serial.printf("Stream pointer available. client->available()=%d\r\n", clientDbg->available());
+        size_t to_read = 0;
+        unsigned long start_ms = millis();
+        while (clientDbg->connected() || clientDbg->available()) {
+          if (clientDbg->available()) {
+            int chunk = clientDbg->readBytes((char*)wav_buffer + to_read, 1024);
+            if (chunk <= 0) break;
+            to_read += chunk;
+            if (to_read >= MOLLOC_SIZE) break;
+          } else {
+            if (millis() - start_ms > 5000) break; // timeout waiting for data
+            delay(5);
+          }
+        }
+        Serial.printf("Read %u bytes for debug dump\r\n", (unsigned)to_read);
+
+        if (to_read >= 4 && wav_buffer[0] == 'R' && wav_buffer[1] == 'I' && wav_buffer[2] == 'F' && wav_buffer[3] == 'F') {
+          Serial.println("Detected RIFF header in response — treating as WAV audio.");
+          int dump_n = to_read < 64 ? to_read : 64;
+          Serial.print("First "); Serial.print(dump_n); Serial.println(" bytes (hex):");
+          for (int i = 0; i < dump_n; ++i) Serial.printf("%02x ", wav_buffer[i]);
+          Serial.println();
+          Serial.println("First bytes (ASCII, non-printable shown as '.'):");
+          for (int i = 0; i < dump_n; ++i) { char c = (char)wav_buffer[i]; if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.'); }
+          Serial.println();
+          i2s_output_wav(wav_buffer, to_read);
+        } else if (to_read > 0) {
+          // Fallback: show a shorter debug dump
+          int dump_n = to_read < 128 ? to_read : 128;
+          Serial.println("Debug dump (hex):");
+          for (int i = 0; i < dump_n; ++i) Serial.printf("%02x ", wav_buffer[i]);
+          Serial.println();
+          Serial.println("Debug dump (ASCII):");
+          for (int i = 0; i < dump_n; ++i) { char c = (char)wav_buffer[i]; if (c >= 32 && c <= 126) Serial.print(c); else Serial.print('.'); }
+          Serial.println();
+        } else {
+          Serial.println("No bytes available on stream for debug dump.");
+        }
+      } else {
+        Serial.println("No stream pointer available for debug dump.");
+      }
+    }
+  } else {
+    Serial.printf("Piper POST failed, error: %s\r\n", http.errorToString(code).c_str());
+  }
+  http.end();
+}
+
 // Stream a WAV (header + raw PCM in PSRAM) as multipart/form-data to the transcription server
 void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -312,6 +546,8 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   if (text.length()) {
     Serial.println("Transcription:");
     Serial.println(text);
+    // Send transcription to Ollama
+    send_transcription_to_ollama(text);
   } else {
     Serial.println("No transcription found in response.");
   }

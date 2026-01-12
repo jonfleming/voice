@@ -18,7 +18,38 @@ bool i2s_output_init(int bclk, int lrc, int dout) {
 
 void i2s_output_wav(uint8_t *data, size_t len)
 {
-    i2s_output.playWAV(data, len);
+  // Inspect WAV header (if present) and reconfigure I2S to match sample rate / bit depth / channels
+  if (len >= 44 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F') {
+    // little-endian sample rate at offset 24
+    uint32_t sample_rate = (uint32_t)data[24] | ((uint32_t)data[25] << 8) | ((uint32_t)data[26] << 16) | ((uint32_t)data[27] << 24);
+    uint16_t channels = (uint16_t)data[22] | ((uint16_t)data[23] << 8);
+    uint16_t bits_per_sample = (uint16_t)data[34] | ((uint16_t)data[35] << 8);
+
+    Serial.printf("WAV header: sample_rate=%u, channels=%u, bits_per_sample=%u\r\n", sample_rate, channels, bits_per_sample);
+
+    // Choose data bit width enum
+    i2s_data_bit_width_t data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
+    if (bits_per_sample <= 16) data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
+
+    // Choose slot mode (mono/stereo)
+    i2s_slot_mode_t slot_mode = I2S_SLOT_MODE_STEREO;
+    // Some ESP_I2S variants support mono slot mode constant; try to use mono if available
+  #ifdef I2S_SLOT_MODE_MONO
+    if (channels == 1) slot_mode = I2S_SLOT_MODE_MONO;
+  #else
+    (void)channels; // silence unused variable when mono constant not defined
+  #endif
+
+    // Reinitialize I2S with WAV parameters. End first to allow reconfiguration.
+    i2s_output.end();
+    if (!i2s_output.begin(I2S_MODE_STD, sample_rate, data_bit_width, slot_mode, I2S_STD_SLOT_BOTH)) {
+      Serial.println("Failed to reinitialize I2S output with WAV parameters, falling back to default.");
+      // attempt to reinit with default settings
+      i2s_output.begin(I2S_MODE_STD, 32000, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH);
+    }
+  }
+
+  i2s_output.playWAV(data, len);
 }
 
 void i2s_output_deinit(void)
