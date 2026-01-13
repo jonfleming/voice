@@ -200,6 +200,63 @@ void Display::init(int screenDir)
   setupLVGL();         // Setup LVGL
 }
 
+// Create a small instruction label at the top of the screen.
+// Uses LVGL so the label is part of LV's object tree and will persist
+// until you remove or hide it. Call after `Display::init()`.
+void Display::showBootInstructions(const char* text)
+{
+  // If a boot label already exists, update text and make sure it's visible
+  if (boot_label) {
+    lv_label_set_text(boot_label, text);
+    lv_obj_clear_flag(boot_label, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  // Create a label on the active screen and save the pointer
+  boot_label = lv_label_create(lv_scr_act());
+  lv_label_set_text(boot_label, text);
+  lv_obj_set_width(boot_label, screenWidth);
+  lv_obj_set_style_text_align(boot_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(boot_label, LV_ALIGN_TOP_MID, 0, 6);
+}
+
+void Display::hideBootInstructions()
+{
+  if (!boot_label) return;
+  lv_obj_del(boot_label);
+  boot_label = nullptr;
+}
+
+void Display::showTranscription(const char* text)
+{
+  // Remove existing transcription if present
+  if (transcription_label) {
+    lv_label_set_text(transcription_label, text);
+    return;
+  }
+
+  // Create label, enable wrapping, and position below the boot label (or near top)
+  transcription_label = lv_label_create(lv_scr_act());
+  lv_label_set_long_mode(transcription_label, LV_LABEL_LONG_WRAP);
+  // Allow some horizontal margin
+  int margin = 12;
+  lv_obj_set_width(transcription_label, screenWidth - margin * 2);
+  lv_label_set_text(transcription_label, text);
+
+  if (boot_label) {
+    lv_obj_align_to(transcription_label, boot_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+  } else {
+    lv_obj_align(transcription_label, LV_ALIGN_TOP_MID, 0, 36);
+  }
+}
+
+void Display::clearTranscription()
+{
+  if (!transcription_label) return;
+  lv_obj_del(transcription_label);
+  transcription_label = nullptr;
+}
+
 // Handle routine display tasks
 void Display::routine(void)
 {

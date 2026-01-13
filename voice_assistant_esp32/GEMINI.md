@@ -24,8 +24,7 @@ Repository contents (this folder)
 -------------------------------
 
 - `voice_assistant_esp32.ino` — Main Arduino sketch and project entrypoint.
-- `driver_*.cpp` / `driver_*.h` — Low-level drivers for audio input/output, button handling, and SD/MMC storage.
-- `Sketch_10_3_Record_And_Play.ino~` — Backup or autosave of a previous sketch iteration.
+- `driver_*.cpp` / `driver_*.h` — Low-level drivers for audio input/output and button handling.
 
 Getting started
 ---------------

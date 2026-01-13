@@ -1,8 +1,8 @@
 /*
 * Sketch_09_3_Reird_And_Play.ino
-* This sketch records audio data from an audio input using the I2S bus and saves it as a WAV file on an SD card.
-* It also plays back the recorded audio files using the same I2S bus.
-* The recording and playback are controlled by a button press.
+* This sketch records audio data from an audio input using the I2S bus, sends it to a server for transcription,
+* receives the transcribed text, sends it to an AI model for generating a response, and then uses a TTS service
+* to convert the response text back into speech, which is played through an audio output using I2S.
 * 
 * Author: Zhentao Lin
 * Date:   2025-08-07
@@ -17,13 +17,10 @@
 // Display
 #include "display.h"
 #include <lvgl.h>
-#define TFT_BL_PIN 20
-Display screen;
 
 #define RECORDER_FOLDER ""
 // Define the pin number for the button (do not modify)
 #define BUTTON_PIN 19         
-// (SD card support removed)
 // Define the pin numbers for audio input (do not modify)
 #define AUDIO_INPUT_SCK 3     
 #define AUDIO_INPUT_WS 14     
@@ -35,9 +32,6 @@ Display screen;
 
 // Define the size of PSRAM in bytes
 #define MOLLOC_SIZE (1024 * 1024)
-
-// Set to 1 to save recordings to SD card, 0 to keep in-memory and avoid SD writes
-#define SAVE_TO_SD 0
 
 // ---------- WiFi / Server configuration (edit before upload) ----------
 #define WIFI_SSID "FLEMING_2"
@@ -77,18 +71,14 @@ void setup() {
     delay(10);
   }
   // Display
-  screen.init(TFT_DIRECTION);
-  
-  // Initialize the button
-  button.init();
+  display.init(TFT_DIRECTION);
+  // Show boot instruction at top of screen
+  display.showBootInstructions("Hold down the button to speak.");
 
   // Initialize the I2S bus for audio input
   audio_input_init(AUDIO_INPUT_SCK, AUDIO_INPUT_WS, AUDIO_INPUT_DIN);
   // Initialize the I2S bus for audio output
   i2s_output_init(AUDIO_OUTPUT_BCLK, AUDIO_OUTPUT_LRC, AUDIO_OUTPUT_DOUT);
-
-  // SD card support removed: using PSRAM-only recording
-  Serial.println("SD card support disabled; using PSRAM-only buffers.");
 
   // Connect to WiFi (used for HTTP requests)
   wifi_connect();
@@ -98,6 +88,7 @@ void setup() {
 
 // Main loop function that runs continuously
 void loop() {
+  display.routine(); 
   // Scan the button state
   button.key_scan();
   // Handle button events
@@ -625,28 +616,14 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   if (text.length()) {
     Serial.println("Transcription:");
     Serial.println(text);
+    // Show the transcribed text on the display (wrapped, no scrolling)
+    display.showTranscription(text.c_str());
     // Send transcription to Ollama
     send_transcription_to_ollama(text);
   } else {
     Serial.println("No transcription found in response.");
   }
 }
-
-/*
-  Integration notes / next steps (how to proceed):
-  - After recording finishes and you have the WAV in `wav_buffer` and `total_size`:
-    - You can POST the WAV to the transcription server as multipart/form-data.
-    - On ESP32 you should stream from SD or PSRAM in chunks to avoid transient OOM.
-  - Suggested flow to implement next:
-    1. Build a multipart/form-data POST that includes the file field named "file" and the "model" param.
-    2. Use WiFiClient + HTTPClient to stream the body so you don't allocate a second buffer.
-    3. Parse the JSON response and print the `text` field to Serial.
-    4. Send that text to Ollama's /api/generate and parse the response.
-    5. Request TTS from Piper and call `i2s_output_wav()` with the returned WAV bytes.
-
-  I can add a streaming multipart example next if you'd like — tell me whether you
-  prefer the ESP to stream directly from PSRAM or from the SD file on your board.
-*/
 
 // Function to handle button events
 void handle_button_events() {
@@ -659,7 +636,9 @@ void handle_button_events() {
     case 1:
       // If the button is pressed, start the recorder task
       if (button_state == Button::KEY_STATE_PRESSED) {
-        start_recorder_task();
+          // hide the boot instructions when the user begins speaking
+          display.hideBootInstructions();
+          start_recorder_task();
       } 
       // If the button is released, stop the recorder task
       else if (button_state == Button::KEY_STATE_RELEASED) {
@@ -750,8 +729,7 @@ void loop_task_sound_recorder(void *pvParameters) {
       iis_buffer_size -= real_size;
     }
   }
-  // Write the WAV header to the file and append data only when saving to SD
-  // Save the final recorded size for in-memory playback and downstream processing
+
   last_recorded_size = total_size;
   Serial.printf("Recorded bytes in PSRAM: %u\r\n", (unsigned)last_recorded_size);
   
