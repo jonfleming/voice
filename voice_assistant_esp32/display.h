@@ -18,7 +18,9 @@ public:
     // Function to initialize the display
     // Pointers to LVGL objects we create so we can update/remove them later
     lv_obj_t* boot_label = nullptr;
-    lv_obj_t* transcription_label = nullptr;
+    lv_obj_t* line1_label = nullptr;
+    lv_obj_t* line2_label = nullptr;
+
     void init(int screenDir);
 
     // Function to handle routine display tasks
@@ -31,8 +33,9 @@ public:
     void hideBootInstructions();
 
     // Display transcription text with word-wrapping (no scrolling).
-    void showTranscription(const char* text);
-    void clearTranscription();
+    void displayLine1(const char* text);
+    void displayLine2(const char* text);
+    void clearLines();
 
     // Getter for tft_show_dirction
     int getTftShowDirection() const { return tft_show_dirction; }

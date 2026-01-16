@@ -227,34 +227,66 @@ void Display::hideBootInstructions()
   boot_label = nullptr;
 }
 
-void Display::showTranscription(const char* text)
+void Display::displayLine1(const char* text)
 {
   // Remove existing transcription if present
-  if (transcription_label) {
-    lv_label_set_text(transcription_label, text);
+  if (line1_label) {
+    lv_label_set_text(line1_label, text);
     return;
   }
 
   // Create label, enable wrapping, and position below the boot label (or near top)
-  transcription_label = lv_label_create(lv_scr_act());
-  lv_label_set_long_mode(transcription_label, LV_LABEL_LONG_WRAP);
+  line1_label = lv_label_create(lv_scr_act());
+  lv_label_set_long_mode(line1_label, LV_LABEL_LONG_WRAP);
   // Allow some horizontal margin
   int margin = 12;
-  lv_obj_set_width(transcription_label, screenWidth - margin * 2);
-  lv_label_set_text(transcription_label, text);
+  lv_obj_set_width(line1_label, screenWidth - margin * 2);
+  lv_label_set_text(line1_label, text);
 
   if (boot_label) {
-    lv_obj_align_to(transcription_label, boot_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+    lv_obj_align_to(line1_label, boot_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
   } else {
-    lv_obj_align(transcription_label, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_align(line1_label, LV_ALIGN_TOP_MID, 0, 36);
   }
 }
 
-void Display::clearTranscription()
+void Display::displayLine2(const char* text)
 {
-  if (!transcription_label) return;
-  lv_obj_del(transcription_label);
-  transcription_label = nullptr;
+  // Remove existing transcription if present
+  if (line2_label) {
+    lv_label_set_text(line2_label, text);
+    // re-align because the height may have changed after updating text
+    if (line1_label) lv_obj_align_to(line2_label, line1_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+    return;
+  }
+
+  // Create label, enable wrapping, and position below line1_label (or near top)
+  line2_label = lv_label_create(lv_scr_act());
+  lv_label_set_long_mode(line2_label, LV_LABEL_LONG_WRAP);
+  int margin = 12;
+  lv_obj_set_width(line2_label, screenWidth - margin * 2);
+  lv_label_set_text(line2_label, text);
+
+  if (line1_label) {
+    // place line2 just below line1 with 6px spacing
+    lv_obj_align_to(line2_label, line1_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 6);
+  } else {
+    // fallback position if line1 doesn't exist
+    lv_obj_align(line2_label, LV_ALIGN_TOP_MID, 0, 60);
+  }
+}
+
+void Display::clearLines()
+{
+  if (line1_label) {
+    lv_obj_del(line1_label);
+    line1_label = nullptr;
+  }
+
+  if (line2_label) {
+    lv_obj_del(line2_label);
+    line2_label = nullptr;
+  }
 }
 
 // Handle routine display tasks
