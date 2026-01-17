@@ -35,7 +35,7 @@ SemaphoreHandle_t display_mutex = NULL;
 #define AUDIO_OUTPUT_DOUT 1   
 
 // Define the size of PSRAM in bytes
-#define MOLLOC_SIZE (1024 * 1024)
+#define MOLLOC_SIZE (4 * 1024 * 1024)
 
 // ---------- WiFi / Server configuration (edit before upload) ----------
 #define WIFI_SSID "FLEMING_2"
