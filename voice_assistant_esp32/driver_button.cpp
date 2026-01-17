@@ -28,7 +28,14 @@ void Button::set_threshold_range(int range) {
 }
 
 void Button::key_scan() {
-  int analogVolt = analogReadMilliVolts(pin);
+  // Use raw ADC reading instead of analogReadMilliVolts() to avoid
+  // adc_oneshot driver calls that can intermittently fail on some cores.
+  // Convert raw ADC value to an approximate millivolt value for
+  // compatibility with existing voltage threshold logic.
+  int raw = analogRead(pin);
+  // analogReadResolution was set to 12 in init(); raw range is 0..4095.
+  // Approximate Vref as 3300mV which matches the original threshold units.
+  int analogVolt = (raw * 3300) / 4095;
 
   // Determine button state based on voltage value
   btnVolt = Volt_330;

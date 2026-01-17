@@ -17,6 +17,10 @@
 // Display
 #include "display.h"
 #include <lvgl.h>
+#include <freertos/semphr.h>
+
+// Mutex to protect display request buffers
+SemaphoreHandle_t display_mutex = NULL;
 
 #define RECORDER_FOLDER ""
 // Define the pin number for the button (do not modify)
@@ -64,7 +68,7 @@ size_t last_recorded_size = 0;
 
 // VAD parameters
 #define VAD_WINDOW_SIZE 128  // number of stereo pairs to process (256 left samples)
-#define VAD_THRESHOLD 1000   // threshold for mean abs value (tune this)
+#define VAD_THRESHOLD 3000   // threshold for mean abs value (tune this)
 #define VAD_LOW_COUNT 5      // number of low energy windows to stop recording
 
 // VAD state
@@ -79,6 +83,64 @@ TaskHandle_t player_task_handle = NULL;
 
 // TTS playback flag to disable VAD during playback
 bool tts_playing = false;
+// Request to stop TTS playback (set by UI/button)
+volatile bool tts_stop_requested = false;
+// Guard to prevent recorder from starting while playback is active
+volatile bool playback_active = false;
+
+// Thread-safe display request buffers (background tasks must never call LVGL directly)
+char display_line1_buf[128] = {0};
+volatile bool display_line1_pending = false;
+char display_line2_buf[128] = {0};
+volatile bool display_line2_pending = false;
+
+// Boot instruction requests
+char display_boot_buf[128] = {0};
+volatile bool display_boot_show_pending = false;
+volatile bool display_boot_hide_pending = false;
+// Request to clear both display lines (processed on main loop)
+volatile bool display_clear_pending = false;
+
+void request_showBootInstructions(const char *text) {
+  if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+  strncpy(display_boot_buf, text, sizeof(display_boot_buf)-1);
+  display_boot_buf[sizeof(display_boot_buf)-1] = '\0';
+  display_boot_show_pending = true;
+  display_boot_hide_pending = false;
+  if (display_mutex) xSemaphoreGive(display_mutex);
+}
+
+void request_hideBootInstructions() {
+  if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+  display_boot_hide_pending = true;
+  display_boot_show_pending = false;
+  if (display_mutex) xSemaphoreGive(display_mutex);
+}
+
+// Request to clear display lines from background tasks
+void request_clear_lines() {
+  if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+  display_clear_pending = true;
+  if (display_mutex) xSemaphoreGive(display_mutex);
+}
+
+// Request a main-loop display update for line1
+void request_display_line1(const char *text) {
+  if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+  strncpy(display_line1_buf, text, sizeof(display_line1_buf)-1);
+  display_line1_buf[sizeof(display_line1_buf)-1] = '\0';
+  display_line1_pending = true;
+  if (display_mutex) xSemaphoreGive(display_mutex);
+}
+
+// Request a main-loop display update for line2
+void request_display_line2(const char *text) {
+  if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+  strncpy(display_line2_buf, text, sizeof(display_line2_buf)-1);
+  display_line2_buf[sizeof(display_line2_buf)-1] = '\0';
+  display_line2_pending = true;
+  if (display_mutex) xSemaphoreGive(display_mutex);
+}
 
 // Persistent WiFi clients for HTTP keep-alive
 WiFiClient whisper_client;
@@ -105,6 +167,12 @@ void setup() {
   // Initialize the I2S bus for audio output
   i2s_output_init(AUDIO_OUTPUT_BCLK, AUDIO_OUTPUT_LRC, AUDIO_OUTPUT_DOUT);
 
+  // Create mutex for display buffer protection
+  display_mutex = xSemaphoreCreateMutex();
+  if (!display_mutex) {
+    Serial.println("Warning: failed to create display mutex");
+  }
+
   // Connect to WiFi (used for HTTP requests)
   wifi_connect();
 
@@ -116,6 +184,42 @@ void setup() {
 
 // Main loop function that runs continuously
 void loop() {
+  // Apply any pending display requests from background tasks
+  if (display_line1_pending) {
+    if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+    char tmp[128];
+    strncpy(tmp, display_line1_buf, sizeof(tmp));
+    display_line1_pending = false;
+    if (display_mutex) xSemaphoreGive(display_mutex);
+    display.displayLine1(tmp);
+  }
+  if (display_line2_pending) {
+    if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+    char tmp2[128];
+    strncpy(tmp2, display_line2_buf, sizeof(tmp2));
+    display_line2_pending = false;
+    if (display_mutex) xSemaphoreGive(display_mutex);
+    display.displayLine2(tmp2);
+  }
+  if (display_boot_show_pending) {
+    if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+    char tmp3[128];
+    strncpy(tmp3, display_boot_buf, sizeof(tmp3));
+    display_boot_show_pending = false;
+    if (display_mutex) xSemaphoreGive(display_mutex);
+    display.showBootInstructions(tmp3);
+  } else if (display_boot_hide_pending) {
+    if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+    display_boot_hide_pending = false;
+    if (display_mutex) xSemaphoreGive(display_mutex);
+    display.hideBootInstructions();
+  }
+  if (display_clear_pending) {
+    if (display_mutex) xSemaphoreTake(display_mutex, portMAX_DELAY);
+    display_clear_pending = false;
+    if (display_mutex) xSemaphoreGive(display_mutex);
+    display.clearLines();
+  }
   display.routine(); 
   // Scan the button state
   button.key_scan();
@@ -372,6 +476,20 @@ void send_text_to_piper(const String &text) {
       contentType.c_str(), headerContentLength.c_str(), contentLenReported);
 
     if (contentType.indexOf("audio/") == 0 || contentType.indexOf("audio") >= 0) {
+      // If a recorder is running, request it to stop and wait briefly
+      if (is_recorder_task_running()) {
+        Serial.println("Recorder active when starting TTS: requesting stop...");
+        stop_recorder_task();
+        unsigned long wait_start = millis();
+        while (is_recorder_task_running() && (millis() - wait_start) < 2000) {
+          vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+        if (is_recorder_task_running()) {
+          Serial.println("Warning: recorder did not stop before TTS start");
+        }
+      }
+      // Claim playback lock so no recorder starts while TTS plays
+      playback_active = true;
       tts_playing = true;  // Disable VAD during TTS playback
       // Stream audio: parse WAV header when it arrives, configure I2S, then feed PCM chunks to I2S.
       WiFiClient *client = http.getStreamPtr();
@@ -380,6 +498,9 @@ void send_text_to_piper(const String &text) {
         http.end();
         return;
       }
+
+      // Clear any previous stop request before starting playback
+      tts_stop_requested = false;
 
       const size_t CHUNK = 1024;
       uint8_t *stream_buf = (uint8_t *)malloc(CHUNK);
@@ -399,8 +520,20 @@ void send_text_to_piper(const String &text) {
 
       unsigned long start_ms = millis();
       while (client->connected() || client->available()) {
+        // Allow UI to request an immediate stop of playback
+        if (tts_stop_requested) {
+          Serial.println("TTS playback aborted by user request");
+          break;
+        }
         if (client->available()) {
-          int r = client->readBytes((char *)stream_buf, CHUNK);
+          int avail = client->available();
+          int toread = (avail > (int)CHUNK) ? (int)CHUNK : avail;
+          if (toread <= 0) {
+            // nothing to read this iteration
+            delay(2);
+            continue;
+          }
+          int r = client->readBytes((char *)stream_buf, toread);
           if (r <= 0) break;
 
           size_t p = 0;
@@ -522,6 +655,11 @@ void send_text_to_piper(const String &text) {
               }
           }
           start_ms = millis();
+          // Check if user requested stop during processing
+          if (tts_stop_requested) {
+            Serial.println("TTS playback abort requested after chunk");
+            break;
+          }
         } else {
           // no data available right now; give CPU to other tasks
           delay(2);
@@ -531,18 +669,20 @@ void send_text_to_piper(const String &text) {
           }
         }
       }
-
+      // Cleanup after streaming loop
       if (convert_buf) free(convert_buf);
       free(stream_buf);
       if (header_parsed) {
         // Give a small time for the output buffer to drain then end stream
         delay(20);
         i2s_output_stream_end();
-        tts_playing = false;  // Re-enable VAD after TTS playback
       } else {
         Serial.println("No streaming audio played (header not parsed)");
-        tts_playing = false;
       }
+      // Reset flags and end HTTP
+      tts_playing = false;  // Re-enable VAD after TTS playback
+      tts_stop_requested = false;
+      playback_active = false;
     } else if (contentType.indexOf("application/json") >= 0) {
       String payload = http.getString();
       Serial.println("TTS returned JSON instead of audio: ");
@@ -584,8 +724,8 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   uint32_t wav_header_size = 44;
   uint32_t content_length = part_model.length() + part_file_header.length() + wav_header_size + length + part_end.length();
 
-  Serial.printf("Connecting to %s:%d\r\n", host, port);
   if (!whisper_client.connected()) {
+    Serial.printf("Connecting to %s:%d\r\n", host, port);
     if (!whisper_client.connect(host, port)) {
       Serial.println("Connection failed");
       return;
@@ -623,8 +763,7 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   whisper_client.print(part_end);
 
   Serial.println("Request sent, waiting for response...");
-  display.displayLine2("Processing...");
-  display.routine();
+  request_display_line2("Processing...");
 
   // Read response
   unsigned long timeout = millis() + 10000; // 10s timeout
@@ -654,17 +793,20 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
 
   // Extract `text` field and print
   String text = extract_json_string_value(json, "text");
-  if (text.length()) {
+    if (text.length()) {
     Serial.println("Transcription:");
     Serial.println(text);
     // Show the transcribed text on the display (wrapped, no scrolling)
-    display.displayLine1(text.c_str());
+    request_display_line1(text.c_str());
+    request_display_line2("Generating response...");
     // Send transcription to Ollama
     send_transcription_to_ollama(text);
   } else {
+    // Clear the "Processing..." message on the display (request main-loop to handle LVGL)
+    request_clear_lines();
+
     Serial.println("No transcription found in response.");
-    display.displayLine1("No speech detected. Ready to listen.");
-    display.routine();
+    request_display_line1("No speech detected. Ready to listen.");
     vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
   }
 }
@@ -683,9 +825,18 @@ void handle_button_events() {
         if (vad_enabled) {
           // Disable VAD
           vad_enabled = false;
-          // Show boot instructions again
-          display.showBootInstructions("Press button to start VAD");
-          display.routine();
+          // If TTS is playing, request it to stop immediately
+          request_clear_lines();
+          request_display_line2("Stopping...");
+          tts_stop_requested = true;
+
+          if (tts_playing) {
+            Serial.println("VAD disabled: requesting TTS stop");
+            // End I2S streaming so audio stops quickly
+            i2s_output_stream_end();
+          }
+          // Show boot instructions again (request main-loop to update LVGL)
+          request_showBootInstructions("Press button to start a conversation.\nCurrently not listening.");
           // If a recorder task is currently running, stop it
           if (is_recorder_task_running()) {
             stop_recorder_task();
@@ -694,9 +845,8 @@ void handle_button_events() {
         } else {
           // Enable VAD
           vad_enabled = true;
-          display.hideBootInstructions();
-          display.displayLine1("VAD enabled. Listening...");
-          display.routine();
+          request_hideBootInstructions();
+          request_display_line1("Starting conversation. Listening...");
           Serial.println("VAD enabled via button");
         }
       }
@@ -724,6 +874,11 @@ void handle_button_events() {
 
 /* Start recording task */
 void start_recorder_task(void) {
+  // Do not start recorder while playback is active
+  if (playback_active) {
+    Serial.println("Recorder start suppressed: playback active");
+    return;
+  }
   // Check if the recorder task is not already running
   if (recorder_task_handle == NULL) {
     // Mark running and create a new task for recording sound, store its handle
@@ -737,8 +892,7 @@ void stop_recorder_task(void) {
   // Request the recorder task to stop via its task handle (graceful stop)
   if (recorder_task_handle != NULL) {
     Serial.println("Signaling loop_task_sound_recorder to stop...");
-    display.displayLine1("Please wait...");
-    display.routine();
+    request_display_line1("Please wait...");
     // Send a notification to the task to request stop (non-forced)
     xTaskNotifyGive(recorder_task_handle);
   } else {
@@ -772,24 +926,31 @@ void loop_task_sound_recorder(void *pvParameters) {
 
   // Loop until a stop notification is received
   while (!stop_requested) {
-    display.displayLine1("Listening...");
-    display.routine();  // Update display
+    request_display_line1("Listening...");
     // Get the available IIS data size
     int iis_buffer_size = audio_input_get_iis_data_available();
     // Loop while there is IIS data available
     while (iis_buffer_size > 0) {
       // Check for a stop notification (non-blocking)
       if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
-        display.displayLine1("Stopped Listening - Task Stopped");
-        display.routine();
+        Serial.println("Stop requested for recorder task");
+        request_display_line1("Stopped Listening - Task Stopped");
         stop_requested = true;
         break;
       }
       // Check if the buffer is full
       if ((total_size + 512) >= MOLLOC_SIZE) {
         // Stop the recorder task if the buffer is full
-        display.displayLine1("Stopped Listening - Buffer Full");
-        display.routine();
+        Serial.println("Buffer full, stopping recorder task");
+        request_display_line1("Stopped Listening - Buffer Full");
+        stop_requested = true;
+        break;
+      }
+
+      // Check if vad_enabled is still true; if not, stop recording
+      if (!vad_enabled) {
+        Serial.println("VAD disabled, stopping recorder task");
+        request_display_line1("Stopped Listening - Silence Detected");
         stop_requested = true;
         break;
       }
@@ -853,8 +1014,7 @@ void loop_task_play_handle(void *pvParameters) {
   while (!stop_requested) {
       // Check for a stop notification (non-blocking)
       if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
-        display.displayLine1("Stopped Responding - Task Stopped");
-        display.routine();
+        request_display_line1("Stopped Responding - Task Stopped");
         stop_requested = true;
         break;
       }
@@ -866,8 +1026,7 @@ void loop_task_play_handle(void *pvParameters) {
         Serial.println("No in-memory recording available to play.");
       }
       // After playback, stop
-      display.displayLine1("Stopped Responding - Task Finished");
-      display.routine();
+        request_display_line1("Stopped Responding - Task Finished");
       stop_requested = true;
   }
   // Print a message indicating the end of the player task
@@ -892,36 +1051,60 @@ void vad_task(void *pvParameters) {
     int available = audio_input_get_iis_data_available();
     if (available >= 1024) {
       int read_size = audio_input_read_iis_data(buffer, 1024);
-      if (read_size == 1024) {
-        // Process interleaved 32-bit stereo samples
+      if (read_size > 0) {
+        // Process interleaved 32-bit stereo samples. Compute number of stereo pairs
+        // from the number of bytes read to avoid hard-coded sizes.
         int32_t *samples = (int32_t *)buffer;
-        int num_samples = 128;  // number of stereo pairs
-        long sum = 0;
+        int num_samples = read_size / (sizeof(int32_t) * 2);  // stereo pairs
+        if (num_samples <= 0) continue;
+        // First pass: find maximum absolute sample to choose a safe downshift so
+        // the values fit in a 16-bit range without blindly shifting by 16.
+        uint32_t max_abs = 0;
         for (int i = 0; i < num_samples; i++) {
-          int32_t left = samples[i * 2];  // left channel
-          sum += abs(left);
+          int32_t left = samples[i * 2];
+          uint32_t abs32 = (left < 0) ? (uint32_t)(-left) : (uint32_t)left;
+          if (abs32 > max_abs) max_abs = abs32;
         }
-        int avg = sum / num_samples;
 
-        // Debug: print average energy
-        // Serial.printf("VAD avg: %d\n", avg);
+        int shift = 0;
+        while (shift < 31 && (max_abs >> shift) > 32767) shift++;
+
+        // Compute and remove DC bias (mean) before measuring absolute energy
+        long long sum_signed = 0;
+        for (int i = 0; i < num_samples; i++) {
+          int32_t left = samples[i * 2];
+          sum_signed += (long long)left;
+        }
+        int32_t mean_signed = (int32_t)(sum_signed / num_samples);
+
+        long long sum = 0;
+        for (int i = 0; i < num_samples; i++) {
+          int32_t left = samples[i * 2];
+          int32_t centered = left - mean_signed;
+          uint32_t abs32 = (centered < 0) ? (uint32_t)(-centered) : (uint32_t)centered;
+          uint32_t scaled = (shift > 0) ? (abs32 >> shift) : abs32;
+          sum += (long long)scaled;
+        }
+        int avg = (int)(sum / num_samples);
 
         if (avg > VAD_THRESHOLD) {
+          Serial.printf("Recording... VAD avg: %d\n", avg);
           vad_low_energy_count = 0;
           if (!vad_recording && recorder_task_flag == 0) {
             Serial.println("VAD: Start recording");
             // display.hideBootInstructions();
-            display.displayLine1("Detected sound...");
-            display.routine();
+            request_display_line1("Detected sound...");
 
             start_recorder_task();
             vad_recording = true;
           }
         } else {
           vad_low_energy_count++;
+          Serial.printf("VAD avg: %d   count: %d\n", avg, vad_low_energy_count);
           if (vad_recording && vad_low_energy_count >= VAD_LOW_COUNT) {
             Serial.println("VAD: Stop recording");
             stop_recorder_task();
+            vad_enabled = false;  // Disable VAD to process one utterance
             vad_recording = false;
             vad_low_energy_count = 0;
           }
