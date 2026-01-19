@@ -76,6 +76,9 @@ int vad_low_energy_count = 0;
 bool vad_recording = false;
 // When true, VAD will be active and may start/stop recordings automatically
 bool vad_enabled = false;
+// Set to true when VAD was auto-disabled after finishing an utterance so we can
+// re-enable it automatically after processing (but not when the user disabled VAD)
+volatile bool vad_auto_disabled = false;
 TaskHandle_t vad_task_handle;
 // Task handles for recorder and player tasks
 TaskHandle_t recorder_task_handle = NULL;
@@ -809,6 +812,15 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
     request_display_line1("No speech detected. Ready to listen.");
     vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
   }
+
+    // If VAD was auto-disabled to process this utterance, re-enable it now so
+    // the system returns to listening mode automatically. Do not re-enable if
+    // the user explicitly disabled VAD via the button (vad_auto_disabled cleared).
+    if (vad_auto_disabled) {
+      vad_enabled = true;
+      vad_auto_disabled = false;
+      request_display_line1("Ready to listen.");
+    }
 }
 
 // Function to handle button events
@@ -825,6 +837,8 @@ void handle_button_events() {
         if (vad_enabled) {
           // Disable VAD
           vad_enabled = false;
+          // User explicitly disabled VAD; clear auto-disable marker
+          vad_auto_disabled = false;
           // If TTS is playing, request it to stop immediately
           request_clear_lines();
           request_display_line2("Stopping...");
@@ -1105,6 +1119,7 @@ void vad_task(void *pvParameters) {
             Serial.println("VAD: Stop recording");
             stop_recorder_task();
             vad_enabled = false;  // Disable VAD to process one utterance
+            vad_auto_disabled = true; // mark that VAD was auto-disabled so we can re-enable later
             vad_recording = false;
             vad_low_energy_count = 0;
           }
