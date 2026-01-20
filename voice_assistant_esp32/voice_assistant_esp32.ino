@@ -1129,20 +1129,3 @@ void vad_task(void *pvParameters) {
     vTaskDelay(50 / portTICK_PERIOD_MS);  // ~50ms delay for processing
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
