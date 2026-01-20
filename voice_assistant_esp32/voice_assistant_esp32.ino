@@ -686,6 +686,16 @@ void send_text_to_piper(const String &text) {
       tts_playing = false;  // Re-enable VAD after TTS playback
       tts_stop_requested = false;
       playback_active = false;
+      // If VAD was auto-disabled to process this utterance, re-enable it now
+      // so the system returns to listening mode automatically. Do not
+      // re-enable if the user explicitly disabled VAD via the button
+      // (vad_auto_disabled cleared).
+      if (vad_auto_disabled) {
+        vad_enabled = true;
+        vad_auto_disabled = false;
+        request_clear_lines();
+        request_display_line1("Ready to listen.");
+      }
     } else if (contentType.indexOf("application/json") >= 0) {
       String payload = http.getString();
       Serial.println("TTS returned JSON instead of audio: ");
