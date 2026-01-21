@@ -18,6 +18,7 @@
 #include "display.h"
 #include <lvgl.h>
 #include <freertos/semphr.h>
+#include <math.h>
 
 // Mutex to protect display request buffers
 SemaphoreHandle_t display_mutex = NULL;
@@ -57,10 +58,6 @@ SemaphoreHandle_t display_mutex = NULL;
 // Global button instance is declared in `driver_button.h` and defined in `display.cpp`.
 // Use the shared `button` instance (defined in display.cpp) via the extern declaration.
 
-// Flag to indicate the status of the recorder task (0=stopped, 1=running)
-int recorder_task_flag = 0;       
-// Flag to indicate the status of the player task (0=stopped, 1=running)
-int player_task_flag = 0;        
 // Save wav data
 uint8_t *wav_buffer;
 // Size of the last recorded buffer stored in PSRAM
@@ -73,23 +70,14 @@ size_t last_recorded_size = 0;
 
 // VAD state
 int vad_low_energy_count = 0;
-bool vad_recording = false;
-// When true, VAD will be active and may start/stop recordings automatically
-bool vad_enabled = false;
-// Set to true when VAD was auto-disabled after finishing an utterance so we can
-// re-enable it automatically after processing (but not when the user disabled VAD)
-volatile bool vad_auto_disabled = false;
-TaskHandle_t vad_task_handle;
-// Task handles for recorder and player tasks
-TaskHandle_t recorder_task_handle = NULL;
-TaskHandle_t player_task_handle = NULL;
+int vad_samples = 0;
 
-// TTS playback flag to disable VAD during playback
-bool tts_playing = false;
-// Request to stop TTS playback (set by UI/button)
-volatile bool tts_stop_requested = false;
-// Guard to prevent recorder from starting while playback is active
-volatile bool playback_active = false;
+// Task handles for state control
+// If handle is NULL, the task/feature is inactive; non-NULL means active
+TaskHandle_t vad_task_handle_internal = NULL;  // The actual VAD task handle
+volatile TaskHandle_t vad_task_handle = NULL;  // NULL = VAD disabled, non-NULL = VAD enabled
+volatile TaskHandle_t recorder_task_handle = NULL;  // NULL = not recording, non-NULL = recording
+volatile TaskHandle_t player_task_handle = NULL;    // NULL = not playing, non-NULL = playing
 
 // Thread-safe display request buffers (background tasks must never call LVGL directly)
 char display_line1_buf[128] = {0};
@@ -179,8 +167,9 @@ void setup() {
   // Connect to WiFi (used for HTTP requests)
   wifi_connect();
 
-  // Start VAD task
-  xTaskCreate(vad_task, "vad_task", 4096, NULL, 1, &vad_task_handle);
+  // Start VAD task (but in disabled state initially)
+  xTaskCreate(vad_task, "vad_task", 4096, NULL, 1, &vad_task_handle_internal);
+  vad_task_handle = NULL;  // Start with VAD disabled
 
   Serial.println("Serial commands: (t)est server, (i)p info\n");
 }
@@ -491,19 +480,17 @@ void send_text_to_piper(const String &text) {
           Serial.println("Warning: recorder did not stop before TTS start");
         }
       }
-      // Claim playback lock so no recorder starts while TTS plays
-      playback_active = true;
-      tts_playing = true;  // Disable VAD during TTS playback
+      // Mark player as active during TTS playback (prevents recorder from starting and pauses VAD)
+      player_task_handle = vad_task_handle_internal;  // Use non-NULL sentinel value
+
       // Stream audio: parse WAV header when it arrives, configure I2S, then feed PCM chunks to I2S.
       WiFiClient *client = http.getStreamPtr();
       if (!client) {
         Serial.println("No stream pointer available for TTS audio.");
+        player_task_handle = NULL;  // Clear player active state
         http.end();
         return;
       }
-
-      // Clear any previous stop request before starting playback
-      tts_stop_requested = false;
 
       const size_t CHUNK = 1024;
       uint8_t *stream_buf = (uint8_t *)malloc(CHUNK);
@@ -523,8 +510,8 @@ void send_text_to_piper(const String &text) {
 
       unsigned long start_ms = millis();
       while (client->connected() || client->available()) {
-        // Allow UI to request an immediate stop of playback
-        if (tts_stop_requested) {
+        // Allow UI to request an immediate stop of playback (by clearing player handle)
+        if (player_task_handle == NULL) {
           Serial.println("TTS playback aborted by user request");
           break;
         }
@@ -576,10 +563,8 @@ void send_text_to_piper(const String &text) {
 
               if (ok) {
                 Serial.printf("Parsed WAV header: sr=%u ch=%u bps=%u\r\n", sample_rate, channels, bits_per_sample);
-                tts_playing = true;  // Disable VAD during TTS playback
                 if (!i2s_output_stream_begin(sample_rate, bits_per_sample, channels)) {
                   Serial.println("Failed to begin I2S streaming for TTS audio");
-                  tts_playing = false;
                   break;
                 }
                 header_parsed = true;
@@ -659,7 +644,7 @@ void send_text_to_piper(const String &text) {
           }
           start_ms = millis();
           // Check if user requested stop during processing
-          if (tts_stop_requested) {
+          if (player_task_handle == NULL) {
             Serial.println("TTS playback abort requested after chunk");
             break;
           }
@@ -682,17 +667,11 @@ void send_text_to_piper(const String &text) {
       } else {
         Serial.println("No streaming audio played (header not parsed)");
       }
-      // Reset flags and end HTTP
-      tts_playing = false;  // Re-enable VAD after TTS playback
-      tts_stop_requested = false;
-      playback_active = false;
+      // Clear player handle and re-enable VAD after TTS playback
+      player_task_handle = NULL;
       // If VAD was auto-disabled to process this utterance, re-enable it now
-      // so the system returns to listening mode automatically. Do not
-      // re-enable if the user explicitly disabled VAD via the button
-      // (vad_auto_disabled cleared).
-      if (vad_auto_disabled) {
-        vad_enabled = true;
-        vad_auto_disabled = false;
+      if (vad_task_handle == NULL) {
+        vad_task_handle = vad_task_handle_internal;
         request_clear_lines();
         request_display_line1("Ready to listen.");
       }
@@ -823,12 +802,9 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
     vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
   }
 
-    // If VAD was auto-disabled to process this utterance, re-enable it now so
-    // the system returns to listening mode automatically. Do not re-enable if
-    // the user explicitly disabled VAD via the button (vad_auto_disabled cleared).
-    if (vad_auto_disabled) {
-      vad_enabled = true;
-      vad_auto_disabled = false;
+    // Re-enable VAD after processing (if it was auto-disabled)
+    if (vad_task_handle == NULL) {
+      vad_task_handle = vad_task_handle_internal;
       request_display_line1("Ready to listen.");
     }
 }
@@ -840,73 +816,55 @@ void handle_button_events() {
   // Get the key value associated with the button press
   int button_key_value = button.get_button_key_value();
   // Switch case based on the button key value
-  switch (button_key_value) {
-    case 1:
-      // Toggle VAD only on the debounced PRESSED edge (rising edge)
-      if (button_state == Button::KEY_STATE_PRESSED && last_button_state_for_toggle != Button::KEY_STATE_PRESSED) {
-        if (vad_enabled) {
-          // Disable VAD
-          vad_enabled = false;
-          // User explicitly disabled VAD; clear auto-disable marker
-          vad_auto_disabled = false;
-          // If TTS is playing, request it to stop immediately
-          request_clear_lines();
-          request_display_line2("Stopping...");
-          tts_stop_requested = true;
+  // Toggle VAD only on the debounced PRESSED edge (rising edge)
+  if (button_state == Button::KEY_STATE_PRESSED && last_button_state_for_toggle != Button::KEY_STATE_PRESSED) {
+    if (vad_task_handle != NULL) {
+      // Disable VAD by clearing the handle
+      vad_task_handle = NULL;
 
-          if (tts_playing) {
-            Serial.println("VAD disabled: requesting TTS stop");
-            // End I2S streaming so audio stops quickly
-            i2s_output_stream_end();
-          }
-          // Show boot instructions again (request main-loop to update LVGL)
-          request_showBootInstructions("Press button to start a conversation.\nCurrently not listening.");
-          // If a recorder task is currently running, stop it
-          if (is_recorder_task_running()) {
-            stop_recorder_task();
-          }
-          Serial.println("VAD disabled via button");
-        } else {
-          // Enable VAD
-          vad_enabled = true;
-          request_hideBootInstructions();
-          request_display_line1("Starting conversation. Listening...");
-          Serial.println("VAD enabled via button");
-        }
-      }
-      // update last state for edge detection
-      last_button_state_for_toggle = button_state;
-      break;
-    case 2:
-      // If the button is pressed, start the player task
-      if (button_state == Button::KEY_STATE_PRESSED) {
-        start_player_task();
-      }
-      break;
-    case 3:
-      // If the button is pressed, stop the player task
-      if (button_state == Button::KEY_STATE_PRESSED) {
+      request_clear_lines();
+      request_display_line2("Stopping...");
+
+      // Stop any active playback
+      if (player_task_handle != NULL) {
+        Serial.println("VAD disabled: stopping player");
         stop_player_task();
+        // End I2S streaming so audio stops quickly
+        i2s_output_stream_end();
       }
-    case 4:
-    case 5:
-    default:
-      // Default case for other button key values
-      break;
+
+      // Stop any active recording
+      if (recorder_task_handle != NULL) {
+        Serial.println("VAD disabled: stopping recorder");
+        stop_recorder_task();
+      }
+
+      // Show boot instructions again
+      request_showBootInstructions("Press button to start a conversation.\nCurrently not listening.");
+      Serial.println("VAD disabled via button");
+    } else {
+      // Enable VAD by setting the handle
+      vad_task_handle = vad_task_handle_internal;
+      request_hideBootInstructions();
+      request_clear_lines();
+      request_display_line1("Button pressed: Listening enabled.");
+      Serial.println("VAD enabled via button");
+    }
   }
+  // Update last button state for edge detection
+  last_button_state_for_toggle = button_state;
 }
 
 /* Start recording task */
 void start_recorder_task(void) {
-  // Do not start recorder while playback is active
-  if (playback_active) {
-    Serial.println("Recorder start suppressed: playback active");
+  // Do not start recorder while player is active
+  if (player_task_handle != NULL) {
+    Serial.println("Recorder start suppressed: player active");
     return;
   }
   // Check if the recorder task is not already running
   if (recorder_task_handle == NULL) {
-    // Mark running and create a new task for recording sound, store its handle
-    recorder_task_flag = 1;
+    // Create a new task for recording sound, store its handle
     xTaskCreate(loop_task_sound_recorder, "loop_task_sound_recorder", 4096, NULL, 1, &recorder_task_handle);
   }
 }
@@ -917,8 +875,10 @@ void stop_recorder_task(void) {
   if (recorder_task_handle != NULL) {
     Serial.println("Signaling loop_task_sound_recorder to stop...");
     request_display_line1("Please wait...");
-    // Send a notification to the task to request stop (non-forced)
-    xTaskNotifyGive(recorder_task_handle);
+    // Clear the handle to signal stop and send notification
+    TaskHandle_t temp = recorder_task_handle;
+    recorder_task_handle = NULL;
+    xTaskNotifyGive(temp);
   } else {
     Serial.println("Recorder task not running");
   }
@@ -926,8 +886,8 @@ void stop_recorder_task(void) {
 
 /* Check if recording task is active */
 int is_recorder_task_running(void) {
-  // Return the status of the recorder task
-  return recorder_task_flag;
+  // Return the status based on handle
+  return (recorder_task_handle != NULL) ? 1 : 0;
 }
 
 /* Main recording task loop */
@@ -938,7 +898,7 @@ void loop_task_sound_recorder(void *pvParameters) {
   int total_size = 0;
   bool stop_requested = false;
   // Allocate memory in PSRAM for storing audio data
-  if(wav_buffer!=NULL && player_task_flag == 0)
+  if(wav_buffer!=NULL && player_task_handle == NULL)
   {
     // Free the allocated memory in PSRAM only if player is not using it
     heap_caps_free(wav_buffer);
@@ -948,15 +908,15 @@ void loop_task_sound_recorder(void *pvParameters) {
 
   // No filesystem: record directly into PSRAM buffer
 
-  // Loop until a stop notification is received
-  while (!stop_requested) {
+  // Loop until a stop notification is received or handle is cleared
+  while (!stop_requested && recorder_task_handle != NULL) {
     request_display_line1("Listening...");
     // Get the available IIS data size
     int iis_buffer_size = audio_input_get_iis_data_available();
     // Loop while there is IIS data available
     while (iis_buffer_size > 0) {
-      // Check for a stop notification (non-blocking)
-      if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
+      // Check for a stop notification (non-blocking) or if handle was cleared
+      if (ulTaskNotifyTake(pdTRUE, 0) > 0 || recorder_task_handle == NULL) {
         Serial.println("Stop requested for recorder task");
         request_display_line1("Stopped Listening - Task Stopped");
         stop_requested = true;
@@ -971,13 +931,6 @@ void loop_task_sound_recorder(void *pvParameters) {
         break;
       }
 
-      // Check if vad_enabled is still true; if not, stop recording
-      if (!vad_enabled) {
-        Serial.println("VAD disabled, stopping recorder task");
-        request_display_line1("Stopped Listening - Silence Detected");
-        stop_requested = true;
-        break;
-      }
       // Read IIS data into the buffer
       int real_size = audio_input_read_iis_data((char*)wav_buffer + total_size, 512);
       // Update the total size of recorded data
@@ -990,15 +943,13 @@ void loop_task_sound_recorder(void *pvParameters) {
 
   last_recorded_size = total_size;
   Serial.printf("Recorded bytes in PSRAM: %u\r\n", (unsigned)last_recorded_size);
-  
+
   Serial.printf("write wav size:%d\r\n", total_size);
   // Stream the recorded WAV (header + PSRAM buffer) to the transcription server
   post_wav_stream_psram(STT_MODEL, wav_buffer, total_size);
   // Print a message indicating the end of the recording task
   Serial.println("loop_task_sound_recorder stop...");
-  // Clear running indicators and handle, then delete the current task
-  recorder_task_flag = 0;
-  vad_recording = false;
+  // Clear handle and delete the current task
   recorder_task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -1007,7 +958,6 @@ void loop_task_sound_recorder(void *pvParameters) {
 void start_player_task(void) {
   // Check if the player task is not already running
   if (player_task_handle == NULL) {
-    player_task_flag = 1;
     xTaskCreate(loop_task_play_handle, "loop_task_play_handle", 4096, NULL, 1, &player_task_handle);
   }
 }
@@ -1017,7 +967,10 @@ void stop_player_task(void) {
   // Request player task to stop by notifying it
   if (player_task_handle != NULL) {
     Serial.println("Signaling loop_task_play_handle to stop...");
-    xTaskNotifyGive(player_task_handle);
+    // Clear the handle to signal stop and send notification
+    TaskHandle_t temp = player_task_handle;
+    player_task_handle = NULL;
+    xTaskNotifyGive(temp);
   } else {
     Serial.println("Player task not running");
   }
@@ -1025,8 +978,8 @@ void stop_player_task(void) {
 
 /* Check if player task is active */
 int is_player_task_running(void) {
-  // Return the status of the player task
-  return player_task_flag;
+  // Return the status based on handle
+  return (player_task_handle != NULL) ? 1 : 0;
 }
 
 /* Main player task loop */
@@ -1034,10 +987,10 @@ void loop_task_play_handle(void *pvParameters) {
   // Print a message indicating the start of the player task
   Serial.println("loop_task_play_handle start...");
   bool stop_requested = false;
-  // Loop while the player task is running
-  while (!stop_requested) {
-      // Check for a stop notification (non-blocking)
-      if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
+  // Loop while the player task is running and handle is not NULL
+  while (!stop_requested && player_task_handle != NULL) {
+      // Check for a stop notification (non-blocking) or if handle was cleared
+      if (ulTaskNotifyTake(pdTRUE, 0) > 0 || player_task_handle == NULL) {
         request_display_line1("Stopped Responding - Task Stopped");
         stop_requested = true;
         break;
@@ -1050,13 +1003,12 @@ void loop_task_play_handle(void *pvParameters) {
         Serial.println("No in-memory recording available to play.");
       }
       // After playback, stop
-        request_display_line1("Stopped Responding - Task Finished");
+      request_display_line1("Stopped Responding - Task Finished");
       stop_requested = true;
   }
   // Print a message indicating the end of the player task
   Serial.println("loop_task_play_handle stop...");
-  // Clear running indicators and handle, then delete the current task
-  player_task_flag = 0;
+  // Clear handle and delete the current task
   player_task_handle = NULL;
   vTaskDelete(NULL);
 }
@@ -1066,8 +1018,8 @@ void vad_task(void *pvParameters) {
   char buffer[1024];  // 128 stereo samples * 8 bytes = 1024 bytes
 
   while (true) {
-    // Only run VAD when enabled via button; skip while TTS is playing or disabled
-    if (!vad_enabled || button.get_button_state() == Button::KEY_STATE_PRESSED || tts_playing) {
+    // Skip processing if VAD is disabled (handle is NULL) or button is pressed or player is active
+    if (vad_task_handle == NULL || button.get_button_state() == Button::KEY_STATE_PRESSED || player_task_handle != NULL) {
       vTaskDelay(100 / portTICK_PERIOD_MS);
       continue;
     }
@@ -1075,6 +1027,7 @@ void vad_task(void *pvParameters) {
     int available = audio_input_get_iis_data_available();
     if (available >= 1024) {
       int read_size = audio_input_read_iis_data(buffer, 1024);
+      vad_samples = 0;
       if (read_size > 0) {
         // Process interleaved 32-bit stereo samples. Compute number of stereo pairs
         // from the number of bytes read to avoid hard-coded sizes.
@@ -1112,25 +1065,21 @@ void vad_task(void *pvParameters) {
         int avg = (int)(sum / num_samples);
 
         if (avg > VAD_THRESHOLD) {
-          Serial.printf("Recording... VAD avg: %d\n", avg);
+          vad_samples++;
+          Serial.printf("Recording... Samples: %d VAD Low Energy: %d VAD avg: %d\n", vad_samples, vad_low_energy_count, avg);
           vad_low_energy_count = 0;
-          if (!vad_recording && recorder_task_flag == 0) {
+          if (recorder_task_handle == NULL) {
             Serial.println("VAD: Start recording");
-            // display.hideBootInstructions();
             request_display_line1("Detected sound...");
-
             start_recorder_task();
-            vad_recording = true;
           }
         } else {
           vad_low_energy_count++;
-          Serial.printf("VAD avg: %d   count: %d\n", avg, vad_low_energy_count);
-          if (vad_recording && vad_low_energy_count >= VAD_LOW_COUNT) {
+          Serial.printf("Recording... Samples: %d VAD Low Energy: %d VAD avg: %d\n", vad_samples, vad_low_energy_count, avg);
+          if (recorder_task_handle != NULL && abs(vad_samples - vad_low_energy_count) >= VAD_LOW_COUNT) {
             Serial.println("VAD: Stop recording");
             stop_recorder_task();
-            vad_enabled = false;  // Disable VAD to process one utterance
-            vad_auto_disabled = true; // mark that VAD was auto-disabled so we can re-enable later
-            vad_recording = false;
+            vad_task_handle = NULL;  // Disable VAD while processing the utterance
             vad_low_energy_count = 0;
           }
         }
