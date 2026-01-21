@@ -168,7 +168,9 @@ void setup() {
   wifi_connect();
 
   // Start VAD task (but in disabled state initially)
-  xTaskCreate(vad_task, "vad_task", 4096, NULL, 1, &vad_task_handle_internal);
+  TaskHandle_t temp_handle;
+  xTaskCreate(vad_task, "vad_task", 4096, NULL, 1, &temp_handle);
+  vad_task_handle_internal = temp_handle;
   vad_task_handle = NULL;  // Start with VAD disabled
 
   Serial.println("Serial commands: (t)est server, (i)p info\n");
@@ -865,7 +867,9 @@ void start_recorder_task(void) {
   // Check if the recorder task is not already running
   if (recorder_task_handle == NULL) {
     // Create a new task for recording sound, store its handle
-    xTaskCreate(loop_task_sound_recorder, "loop_task_sound_recorder", 4096, NULL, 1, &recorder_task_handle);
+    TaskHandle_t temp_handle;
+    xTaskCreate(loop_task_sound_recorder, "loop_task_sound_recorder", 4096, NULL, 1, &temp_handle);
+    recorder_task_handle = temp_handle;
   }
 }
 
@@ -958,7 +962,9 @@ void loop_task_sound_recorder(void *pvParameters) {
 void start_player_task(void) {
   // Check if the player task is not already running
   if (player_task_handle == NULL) {
-    xTaskCreate(loop_task_play_handle, "loop_task_play_handle", 4096, NULL, 1, &player_task_handle);
+    TaskHandle_t temp_handle;
+    xTaskCreate(loop_task_play_handle, "loop_task_play_handle", 4096, NULL, 1, &temp_handle);
+    player_task_handle = temp_handle;
   }
 }
 
