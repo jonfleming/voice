@@ -65,13 +65,13 @@ size_t last_recorded_size = 0;
 
 // VAD parameters
 #define VAD_WINDOW_SIZE 128  // number of stereo pairs to process (256 left samples)
-#define VAD_THRESHOLD 3000   // threshold for mean abs value (tune this)
+int vad_threshold = 7000;   // threshold for mean abs value (tune this)
 #define VAD_LOW_COUNT 5      // number of low energy windows to stop recording
+#define VAD_MIN_SAMPLES 0    // minimum samples before VAD does low-energy stop
 
 // VAD state
 int vad_low_energy_count = 0;
-int vad_samples = 0;
-
+unsigned long vad_start_time = 0;
 // Task handles for state control
 // If handle is NULL, the task/feature is inactive; non-NULL means active
 TaskHandle_t vad_task_handle_internal = NULL;  // The actual VAD task handle
@@ -151,7 +151,8 @@ void setup() {
   display.init(TFT_DIRECTION);
   // Show boot instruction at top of screen
   // Prompt user to enable VAD via the button
-  display.showBootInstructions("Press button to start VAD");
+  display.showBootInstructions("Press button to start a conversation.");
+  request_display_line2("");
 
   // Initialize the I2S bus for audio input
   audio_input_init(AUDIO_INPUT_SCK, AUDIO_INPUT_WS, AUDIO_INPUT_DIN);
@@ -219,16 +220,24 @@ void loop() {
   button.key_scan();
   // Handle button events
   handle_button_events();
-  // Simple serial UI for testing WiFi / HTTP
+  // Simple serial UI for setting VAD threshold
   if (Serial.available()) {
-    char c = Serial.read();
-    if (c == 't') {
+    String input = Serial.readStringUntil('\n');
+    if (input.length() > 0) {
+      int value = input.toInt();
+      if (value > 0) {
+        vad_threshold = value;
+        Serial.printf("VAD threshold set to %d\n", vad_threshold);
+      } else if (input == "t") {
       // Test a simple GET to the server root
-      http_test_get();
-    } else if (c == 'i') {
-      // Print IP info
-      Serial.print("IP: ");
-      Serial.println(WiFi.localIP());
+        http_test_get();
+      } else if (input == "i") {
+        // Print IP info
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+      } else {
+        Serial.println("Invalid input");
+      }
     }
   }
   // Delay for 10 milliseconds
@@ -843,6 +852,7 @@ void handle_button_events() {
 
       // Show boot instructions again
       request_showBootInstructions("Press button to start a conversation.\nCurrently not listening.");
+      request_display_line2("");
       Serial.println("VAD disabled via button");
     } else {
       // Enable VAD by setting the handle
@@ -910,11 +920,10 @@ void loop_task_sound_recorder(void *pvParameters) {
   }
   wav_buffer = (uint8_t *)heap_caps_malloc(MOLLOC_SIZE, MALLOC_CAP_SPIRAM);
 
-  // No filesystem: record directly into PSRAM buffer
-
   // Loop until a stop notification is received or handle is cleared
   while (!stop_requested && recorder_task_handle != NULL) {
     request_display_line1("Listening...");
+    request_display_line2("");
     // Get the available IIS data size
     int iis_buffer_size = audio_input_get_iis_data_available();
     // Loop while there is IIS data available
@@ -1033,7 +1042,6 @@ void vad_task(void *pvParameters) {
     int available = audio_input_get_iis_data_available();
     if (available >= 1024) {
       int read_size = audio_input_read_iis_data(buffer, 1024);
-      vad_samples = 0;
       if (read_size > 0) {
         // Process interleaved 32-bit stereo samples. Compute number of stereo pairs
         // from the number of bytes read to avoid hard-coded sizes.
@@ -1070,10 +1078,11 @@ void vad_task(void *pvParameters) {
         }
         int avg = (int)(sum / num_samples);
 
-        if (avg > VAD_THRESHOLD) {
-          vad_samples++;
-          Serial.printf("Recording... Samples: %d VAD Low Energy: %d VAD avg: %d\n", vad_samples, vad_low_energy_count, avg);
+        if (avg > vad_threshold) {
+          Serial.printf("Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", vad_low_energy_count, avg, recorder_task_handle != NULL);
           vad_low_energy_count = 0;
+          vad_start_time = 0;
+          vad_start_time = millis();  // Start the timer when threshold is met
           if (recorder_task_handle == NULL) {
             Serial.println("VAD: Start recording");
             request_display_line1("Detected sound...");
@@ -1081,9 +1090,9 @@ void vad_task(void *pvParameters) {
           }
         } else {
           vad_low_energy_count++;
-          Serial.printf("Recording... Samples: %d VAD Low Energy: %d VAD avg: %d\n", vad_samples, vad_low_energy_count, avg);
-          if (recorder_task_handle != NULL && abs(vad_samples - vad_low_energy_count) >= VAD_LOW_COUNT) {
-            Serial.println("VAD: Stop recording");
+          Serial.printf("%d:Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", millis() - vad_start_time, vad_low_energy_count, avg, recorder_task_handle != NULL);
+          if (recorder_task_handle != NULL && vad_low_energy_count >= VAD_LOW_COUNT && (millis() - vad_start_time >= 5000)) {
+            Serial.printf("VAD: Stop recording.  VAD Low Energy: %d", vad_low_energy_count);
             stop_recorder_task();
             vad_task_handle = NULL;  // Disable VAD while processing the utterance
             vad_low_energy_count = 0;
