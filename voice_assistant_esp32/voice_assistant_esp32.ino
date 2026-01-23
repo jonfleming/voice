@@ -157,6 +157,7 @@ void setup() {
   // Show boot instruction at top of screen
   // Prompt user to enable VAD via the button
   display.showBootInstructions("Press button to start a conversation.");
+  Serial.println("");
   request_display_line2("");
 
   // Initialize the I2S bus for audio input
@@ -511,6 +512,7 @@ void send_text_to_piper(const String &text) {
       const size_t CHUNK = 1024;
       uint8_t *stream_buf = (uint8_t *)malloc(CHUNK);
       uint8_t *convert_buf = NULL; // allocated on-demand for mono->stereo conversion
+      size_t convert_buf_alloc = 0;
       if (!stream_buf) {
         Serial.println("[Piper] Failed to allocate streaming buffer");
         http.end();
@@ -593,17 +595,30 @@ void send_text_to_piper(const String &text) {
                   // If the audio is mono but I2S is stereo by configuration, duplicate samples
                   if (channels == 1 && bits_per_sample > 0) {
                     size_t sample_bytes = (bits_per_sample + 7) / 8;
+                    size_t i2s_bytes = (bits_per_sample <= 16) ? 2 : 4; // I2S uses 16 or 32bit words
                     size_t samples = leftover / sample_bytes;
-                    size_t out_bytes = samples * sample_bytes * 2;
-                    if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                    size_t out_bytes = samples * i2s_bytes * 2;
+                    if (!convert_buf || convert_buf_alloc < out_bytes) {
+                      if (convert_buf) free(convert_buf);
+                      convert_buf = (uint8_t *)malloc(out_bytes);
+                      convert_buf_alloc = convert_buf ? out_bytes : 0;
+                    }
+                    if (!convert_buf) {
+                      Serial.println("[Piper] Failed to allocate conversion buffer");
+                      break;
+                    }
                     uint8_t *outp = convert_buf;
                     uint8_t *inp = header_tmp + data_start;
                     for (size_t si = 0; si < samples; ++si) {
-                      // copy sample
-                      memcpy(outp, inp, sample_bytes);
-                      outp += sample_bytes;
-                      memcpy(outp, inp, sample_bytes);
-                      outp += sample_bytes;
+                      uint8_t tmp[4] = {0,0,0,0};
+                      for (size_t b = 0; b < sample_bytes; ++b) tmp[b] = inp[b];
+                      // sign-extend if sample width < I2S word width
+                      if (sample_bytes < i2s_bytes) {
+                        bool sign = (tmp[sample_bytes - 1] & 0x80) != 0;
+                        for (size_t b = sample_bytes; b < i2s_bytes; ++b) tmp[b] = sign ? 0xFF : 0x00;
+                      }
+                      for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
+                      for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
                       inp += sample_bytes;
                     }
                     i2s_output_stream_write(convert_buf, out_bytes);
@@ -616,14 +631,29 @@ void send_text_to_piper(const String &text) {
                   size_t have = r - (int)p;
                   if (channels == 1 && bits_per_sample > 0) {
                     size_t sample_bytes = (bits_per_sample + 7) / 8;
+                    size_t i2s_bytes = (bits_per_sample <= 16) ? 2 : 4;
                     size_t samples = have / sample_bytes;
-                    size_t out_bytes = samples * sample_bytes * 2;
-                    if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                    size_t out_bytes = samples * i2s_bytes * 2;
+                    if (!convert_buf || convert_buf_alloc < out_bytes) {
+                      if (convert_buf) free(convert_buf);
+                      convert_buf = (uint8_t *)malloc(out_bytes);
+                      convert_buf_alloc = convert_buf ? out_bytes : 0;
+                    }
+                    if (!convert_buf) {
+                      Serial.println("[Piper] Failed to allocate conversion buffer");
+                      break;
+                    }
                     uint8_t *outp = convert_buf;
                     uint8_t *inp = stream_buf + p;
                     for (size_t si = 0; si < samples; ++si) {
-                      memcpy(outp, inp, sample_bytes); outp += sample_bytes;
-                      memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                      uint8_t tmp[4] = {0,0,0,0};
+                      for (size_t b = 0; b < sample_bytes; ++b) tmp[b] = inp[b];
+                      if (sample_bytes < i2s_bytes) {
+                        bool sign = (tmp[sample_bytes - 1] & 0x80) != 0;
+                        for (size_t b = sample_bytes; b < i2s_bytes; ++b) tmp[b] = sign ? 0xFF : 0x00;
+                      }
+                      for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
+                      for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
                       inp += sample_bytes;
                     }
                     i2s_output_stream_write(convert_buf, out_bytes);
@@ -644,14 +674,29 @@ void send_text_to_piper(const String &text) {
             // Header already parsed: write PCM directly
               if (channels == 1 && bits_per_sample > 0) {
                 size_t sample_bytes = (bits_per_sample + 7) / 8;
+                size_t i2s_bytes = (bits_per_sample <= 16) ? 2 : 4;
                 size_t samples = r / sample_bytes;
-                size_t out_bytes = samples * sample_bytes * 2;
-                if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
+                size_t out_bytes = samples * i2s_bytes * 2;
+                if (!convert_buf || convert_buf_alloc < out_bytes) {
+                  if (convert_buf) free(convert_buf);
+                  convert_buf = (uint8_t *)malloc(out_bytes);
+                  convert_buf_alloc = convert_buf ? out_bytes : 0;
+                }
+                if (!convert_buf) {
+                  Serial.println("[Piper] Failed to allocate conversion buffer");
+                  break;
+                }
                 uint8_t *outp = convert_buf;
                 uint8_t *inp = stream_buf;
                 for (size_t si = 0; si < samples; ++si) {
-                  memcpy(outp, inp, sample_bytes); outp += sample_bytes;
-                  memcpy(outp, inp, sample_bytes); outp += sample_bytes;
+                  uint8_t tmp[4] = {0,0,0,0};
+                  for (size_t b = 0; b < sample_bytes; ++b) tmp[b] = inp[b];
+                  if (sample_bytes < i2s_bytes) {
+                    bool sign = (tmp[sample_bytes - 1] & 0x80) != 0;
+                    for (size_t b = sample_bytes; b < i2s_bytes; ++b) tmp[b] = sign ? 0xFF : 0x00;
+                  }
+                  for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
+                  for (size_t b = 0; b < i2s_bytes; ++b) *outp++ = tmp[b];
                   inp += sample_bytes;
                 }
                 i2s_output_stream_write(convert_buf, out_bytes);
@@ -807,8 +852,10 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
     Serial.println("[Whisper] Transcription:");
     Serial.println(text);
     // Show the transcribed text on the display (wrapped, no scrolling)
+    Serial.println(text.c_str());
     request_display_line1(text.c_str());
-    request_display_line2("Generating response...Testing");
+    Serial.println("Generating response");
+    request_display_line2("Generating response");
     // Send transcription to Ollama
     send_transcription_to_ollama(text);
   } else {
@@ -816,12 +863,14 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
     request_clear_lines();
 
     Serial.println("[Whisper] No transcription found in response.");
+    Serial.println("No speech detected. Ready to listen.");
     request_display_line1("No speech detected. Ready to listen.");
   }
 
   // Re-enable VAD after processing (if it was auto-disabled)
   if (vad_task_handle == NULL) {
     vad_task_handle = vad_task_handle_internal;
+    Serial.println("Ready to listen.");
     request_display_line1("Ready to listen.");
   }
 }
@@ -859,6 +908,7 @@ void handle_button_events() {
 
       // Show boot instructions again
       request_showBootInstructions("Press button to start a conversation.\nCurrently not listening.");
+      Serial.println("");
       request_display_line2("");
       Serial.println("[Button] VAD disabled via button");
     } else {
@@ -866,6 +916,7 @@ void handle_button_events() {
       vad_task_handle = vad_task_handle_internal;
       request_hideBootInstructions();
       request_clear_lines();
+      Serial.println("Button pressed: Listening enabled.");
       request_display_line1("Button pressed: Listening enabled.");
       Serial.println("VAD enabled via button");
     }
@@ -895,6 +946,7 @@ void stop_recorder_task(void) {
   // Request the recorder task to stop via its task handle (graceful stop)
   if (recorder_task_handle != NULL) {
     Serial.println("[Recorder] Signaling loop_task_sound_recorder to stop...");
+    Serial.println("Please wait...");
     request_display_line1("Please wait...");
     // Clear the handle to signal stop and send notification
     TaskHandle_t temp = recorder_task_handle;
@@ -933,10 +985,12 @@ void loop_task_sound_recorder(void *pvParameters) {
    vad_total_count = 0;
    vad_silence_count = 0;
 
+  Serial.println("Listening...");
+  request_display_line1("Listening...");
+  request_display_line2("");
+
   // Loop until a stop notification is received or handle is cleared
   while (!stop_requested && recorder_task_handle != NULL && !button_abort) {
-    request_display_line1("Listening...");
-    request_display_line2("");
     // Get the available IIS data size
     int iis_buffer_size = audio_input_get_iis_data_available();
     // Loop while there is IIS data available
@@ -944,6 +998,7 @@ void loop_task_sound_recorder(void *pvParameters) {
       // Check for a stop notification (non-blocking) or if handle was cleared
       if (ulTaskNotifyTake(pdTRUE, 0) > 0 || recorder_task_handle == NULL) {
         Serial.println("[Recorder] Stop requested for recorder task");
+        Serial.println("Stopped Listening - Task Stopped");
         request_display_line1("Stopped Listening - Task Stopped");
         stop_requested = true;
         break;
@@ -952,6 +1007,7 @@ void loop_task_sound_recorder(void *pvParameters) {
       if ((total_size + 512) >= MOLLOC_SIZE) {
         // Stop the recorder task if the buffer is full
         Serial.println("[Recorder] Buffer full, stopping recorder task");
+        Serial.println("Stopped Listening - Buffer Full");
         request_display_line1("Stopped Listening - Buffer Full");
         stop_requested = true;
         break;
@@ -961,6 +1017,7 @@ void loop_task_sound_recorder(void *pvParameters) {
       if (button_abort) {
         // Stop the recorder task if button abort is requested
         Serial.println("[Recorder] Button abort requested, stopping recorder task");
+        Serial.println("Stopped Listening - Button Aborted");
         request_display_line1("Stopped Listening - Button Aborted");
         stop_requested = true;
         break;
@@ -979,6 +1036,7 @@ void loop_task_sound_recorder(void *pvParameters) {
   
   if (!button_abort) {
     if (vad_total_count - vad_silence_count < 6) {
+      Serial.println("Press button to continue.");
       request_display_line1("Press button to continue.");
       request_display_line2("");
       // Clear handle and delete the current task
@@ -990,6 +1048,7 @@ void loop_task_sound_recorder(void *pvParameters) {
         vad_task_handle == NULL ? "VAD stopped" : "VAD active.", recorder_task_handle == NULL ? "Recorder stopped." : "Recorder active.");
       return;
     }
+    Serial.println("Transcribing...");
     request_display_line1("Transcribing...");
     request_display_line2("");
     last_recorded_size = total_size;
@@ -1001,6 +1060,7 @@ void loop_task_sound_recorder(void *pvParameters) {
     // Print a message indicating the end of the recording task
     Serial.println("[Recorder] loop_task_sound_recorder stop...");
   } else {
+    Serial.println("Recording Aborted.");
     request_display_line1("Recording Aborted.");
     request_display_line2("");
     button_abort = false;
@@ -1053,12 +1113,14 @@ void loop_task_play_handle(void *pvParameters) {
       if (button_abort) {
         // Stop the player task if button abort is requested
         Serial.println("[Player] Button abort requested, stopping player task");
+        Serial.println("Stopped Playing - Button Aborted");
         request_display_line1("Stopped Playing - Button Aborted");
         stop_requested = true;
         break;
       }
       // Check for a stop notification (non-blocking) or if handle was cleared
       if (ulTaskNotifyTake(pdTRUE, 0) > 0 || player_task_handle == NULL) {
+        Serial.println("Stopped Responding - Task Stopped");
         request_display_line1("Stopped Responding - Task Stopped");
         stop_requested = true;
         break;
@@ -1071,6 +1133,7 @@ void loop_task_play_handle(void *pvParameters) {
         Serial.println("[Player] No in-memory recording available to play.");
       }
       // After playback, stop
+      Serial.println("Stopped Responding - Task Finished");
       request_display_line1("Stopped Responding - Task Finished");
       stop_requested = true;
   }
@@ -1139,6 +1202,7 @@ void vad_task(void *pvParameters) {
           if (recorder_task_handle == NULL) {
             vad_start_time = millis();  // Start the timer when threshold is met
             Serial.println("[VAD] Start recording");
+            Serial.println("Detected sound...");
             request_display_line1("Detected sound...");
             start_recorder_task();
           }
