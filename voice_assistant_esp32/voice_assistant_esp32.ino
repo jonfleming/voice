@@ -65,9 +65,10 @@ size_t last_recorded_size = 0;
 
 // VAD parameters
 #define VAD_WINDOW_SIZE 128  // number of stereo pairs to process (256 left samples)
-int vad_threshold = 7000;   // threshold for mean abs value (tune this)
+int vad_threshold = 7000;    // threshold for mean abs value (tune this)
 #define VAD_LOW_COUNT 5      // number of low energy windows to stop recording
 #define VAD_MIN_SAMPLES 0    // minimum samples before VAD does low-energy stop
+#define VAD_QUIET_TIME 5000  // minimum time (ms) of low energy before stopping
 
 // VAD state
 int vad_low_energy_count = 0;
@@ -423,8 +424,8 @@ void send_transcription_to_ollama(const String &text) {
   if (code > 0) {
     Serial.printf("[Ollama] HTTP code: %d\r\n", code);
     String resp = http.getString();
-    Serial.println("[Ollama] Response:");
-    Serial.println(resp);
+//    Serial.println("[Ollama] Response:");
+//    Serial.println(resp);
     // Try to extract a usable text response from Ollama JSON.
     // Ollama may stream many small JSON objects; aggregate any "response" fields.
     String ai_text = extract_all_json_string_values(resp, "response");
@@ -516,7 +517,7 @@ void send_text_to_piper(const String &text) {
         return;
       }
 
-      uint8_t header_tmp[1024];
+      uint8_t header_tmp[2048];
       size_t header_pos = 0;
       bool header_parsed = false;
       uint32_t sample_rate = 32000;
@@ -552,8 +553,9 @@ void send_text_to_piper(const String &text) {
 
             // Try parsing when we have at least 44 bytes; continue collecting if parse fails
             if (header_pos >= 44) {
-              // Robust WAV parser: search for 'RIFF'/'WAVE' and then iterate chunks to find 'fmt '
-              bool ok = false;
+              // Robust WAV parser: search for 'RIFF'/'WAVE' and then iterate chunks to find 'fmt ' and 'data'
+              bool fmt_found = false;
+              size_t data_start = 0;
               size_t off = 0;
               if (header_tmp[0] == 'R' && header_tmp[1] == 'I' && header_tmp[2] == 'F' && header_tmp[3] == 'F') {
                 // iterate chunks
@@ -562,33 +564,32 @@ void send_text_to_piper(const String &text) {
                   const char *cid = (const char *)(header_tmp + off);
                   uint32_t csize = (uint32_t)header_tmp[off+4] | ((uint32_t)header_tmp[off+5] << 8) | ((uint32_t)header_tmp[off+6] << 16) | ((uint32_t)header_tmp[off+7] << 24);
                   size_t chunk_data = off + 8;
-                  if (chunk_data + csize > header_pos) break; // not enough bytes yet
                   if (cid[0]=='f' && cid[1]=='m' && cid[2]=='t' && cid[3]==' ') {
                     if (csize >= 16) {
                       channels = (uint16_t)header_tmp[chunk_data+2] | ((uint16_t)header_tmp[chunk_data+3] << 8);
                       sample_rate = (uint32_t)header_tmp[chunk_data+4] | ((uint32_t)header_tmp[chunk_data+5] << 8) | ((uint32_t)header_tmp[chunk_data+6] << 16) | ((uint32_t)header_tmp[chunk_data+7] << 24);
                       bits_per_sample = (uint16_t)header_tmp[chunk_data+14] | ((uint16_t)header_tmp[chunk_data+15] << 8);
-                      ok = true;
+                      fmt_found = true;
                     }
+                  } else if (cid[0]=='d' && cid[1]=='a' && cid[2]=='t' && cid[3]=='a') {
+                    data_start = chunk_data;
                   }
+                  if (chunk_data + csize > header_pos) break; // not enough bytes yet
                   off = chunk_data + csize;
                   if (csize & 1) off++;
                 }
               }
 
-              if (ok) {
-                Serial.printf("[Piper] Parsed WAV header: sr=%u ch=%u bps=%u\r\n", sample_rate, channels, bits_per_sample);
+              if (fmt_found && data_start > 0) {
+                Serial.printf("[Piper] Parsed WAV header: sr=%u ch=%u bps=%u, data starts at %u\r\n", sample_rate, channels, bits_per_sample, data_start);
                 if (!i2s_output_stream_begin(sample_rate, bits_per_sample, channels)) {
                   Serial.println("[Piper] Failed to begin I2S streaming for TTS audio");
                   break;
                 }
                 header_parsed = true;
-                // If there are remaining bytes in the accumulated header after the header offset,
-                // locate where 'data' chunk starts to compute the correct PCM start point. As a
-                // pragmatic fallback, write all remaining bytes after the whole header buffer.
-                // If the current chunk contained PCM after the fmt chunk, write leftover bytes.
-                if (header_pos > off) {
-                  size_t leftover = header_pos - off;
+                // Write any PCM data already received in the header buffer
+                if (header_pos > data_start) {
+                  size_t leftover = header_pos - data_start;
                   // If the audio is mono but I2S is stereo by configuration, duplicate samples
                   if (channels == 1 && bits_per_sample > 0) {
                     size_t sample_bytes = (bits_per_sample + 7) / 8;
@@ -596,7 +597,7 @@ void send_text_to_piper(const String &text) {
                     size_t out_bytes = samples * sample_bytes * 2;
                     if (!convert_buf) convert_buf = (uint8_t *)malloc(out_bytes > CHUNK*2 ? out_bytes : CHUNK*2);
                     uint8_t *outp = convert_buf;
-                    uint8_t *inp = header_tmp + off;
+                    uint8_t *inp = header_tmp + data_start;
                     for (size_t si = 0; si < samples; ++si) {
                       // copy sample
                       memcpy(outp, inp, sample_bytes);
@@ -607,10 +608,10 @@ void send_text_to_piper(const String &text) {
                     }
                     i2s_output_stream_write(convert_buf, out_bytes);
                   } else {
-                    i2s_output_stream_write(header_tmp + off, leftover);
+                    i2s_output_stream_write(header_tmp + data_start, leftover);
                   }
                 }
-                // Also write any remaining bytes from this network read beyond what we consumed
+                // Also write any remaining bytes from this network read beyond what we consumed for header
                 if (r - (int)p > 0) {
                   size_t have = r - (int)p;
                   if (channels == 1 && bits_per_sample > 0) {
@@ -633,6 +634,7 @@ void send_text_to_piper(const String &text) {
               } else {
                   // not enough header bytes to parse fmt/data yet; continue collecting
                   if (header_pos >= sizeof(header_tmp)) {
+                    Serial.printf("[Piper] Header too large or malformed; collected %u bytes, fmt_found=%d, data_start=%u\n", header_pos, fmt_found, data_start);
                     Serial.println("[Piper] Header too large or malformed; aborting streaming playback.");
                     break;
                   }
@@ -770,7 +772,8 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
   whisper_client.print(part_end);
 
   Serial.println("[Whisper] Request sent, waiting for response...");
-  request_display_line2("Processing...");
+  // request_display_line1("Generating response...");
+  // request_display_line2("");
 
   // Read response
   unsigned long timeout = millis() + 10000; // 10s timeout
@@ -805,7 +808,7 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
     Serial.println(text);
     // Show the transcribed text on the display (wrapped, no scrolling)
     request_display_line1(text.c_str());
-    request_display_line2("Generating response...");
+    request_display_line2("Generating response...Testing");
     // Send transcription to Ollama
     send_transcription_to_ollama(text);
   } else {
@@ -814,14 +817,13 @@ void post_wav_stream_psram(const char *model, uint8_t *buffer, size_t length) {
 
     Serial.println("[Whisper] No transcription found in response.");
     request_display_line1("No speech detected. Ready to listen.");
-    vTaskDelay(2000 / portTICK_PERIOD_MS);  // Wait 2 seconds
   }
 
-    // Re-enable VAD after processing (if it was auto-disabled)
-    if (vad_task_handle == NULL) {
-      vad_task_handle = vad_task_handle_internal;
-      request_display_line1("Ready to listen.");
-    }
+  // Re-enable VAD after processing (if it was auto-disabled)
+  if (vad_task_handle == NULL) {
+    vad_task_handle = vad_task_handle_internal;
+    request_display_line1("Ready to listen.");
+  }
 }
 
 // Function to handle button events
@@ -833,7 +835,7 @@ void handle_button_events() {
   // Switch case based on the button key value
   // Toggle VAD only on the debounced PRESSED edge (rising edge)
   if (button_state == Button::KEY_STATE_PRESSED && last_button_state_for_toggle != Button::KEY_STATE_PRESSED) {
-    bool button_abort = true;
+    button_abort = true;
     if (vad_task_handle != NULL) {
       // Disable VAD by clearing the handle
       vad_task_handle = NULL;
@@ -976,7 +978,20 @@ void loop_task_sound_recorder(void *pvParameters) {
   Serial.printf("[Recorder] wav buffer size: %d Total Count: %d Silence Count: %d\r\n", total_size, vad_total_count, vad_silence_count);
   
   if (!button_abort) {
-    request_display_line1("Processing...");
+    if (vad_total_count - vad_silence_count < 6) {
+      request_display_line1("Press button to continue.");
+      request_display_line2("");
+      // Clear handle and delete the current task
+      recorder_task_handle = NULL;
+      vTaskDelete(NULL);
+      // re-enable VAD if it was disabled
+      vad_task_handle = vad_task_handle_internal;
+      Serial.printf("[Recorder] Detected too little speech, skip transcription. %s %s/r/n", 
+        vad_task_handle == NULL ? "VAD stopped" : "VAD active.", recorder_task_handle == NULL ? "Recorder stopped." : "Recorder active.");
+      return;
+    }
+    request_display_line1("Transcribing...");
+    request_display_line2("");
     last_recorded_size = total_size;
     Serial.printf("Recorded bytes in PSRAM: %u\r\n", (unsigned)last_recorded_size);
 
@@ -985,10 +1000,10 @@ void loop_task_sound_recorder(void *pvParameters) {
     post_wav_stream_psram(STT_MODEL, wav_buffer, total_size);
     // Print a message indicating the end of the recording task
     Serial.println("[Recorder] loop_task_sound_recorder stop...");
-    button_abort = false;
   } else {
     request_display_line1("Recording Aborted.");
     request_display_line2("");
+    button_abort = false;
   }
 
   // Clear handle and delete the current task
@@ -1034,7 +1049,14 @@ void loop_task_play_handle(void *pvParameters) {
   Serial.println("[Player] loop_task_play_handle start...");
   bool stop_requested = false;
   // Loop while the player task is running and handle is not NULL
-  while (!stop_requested && player_task_handle != NULL) {
+  while (!stop_requested && player_task_handle != NULL && !button_abort) {
+      if (button_abort) {
+        // Stop the player task if button abort is requested
+        Serial.println("[Player] Button abort requested, stopping player task");
+        request_display_line1("Stopped Playing - Button Aborted");
+        stop_requested = true;
+        break;
+      }
       // Check for a stop notification (non-blocking) or if handle was cleared
       if (ulTaskNotifyTake(pdTRUE, 0) > 0 || player_task_handle == NULL) {
         request_display_line1("Stopped Responding - Task Stopped");
@@ -1110,11 +1132,6 @@ void vad_task(void *pvParameters) {
         }
         int avg = (int)(sum / num_samples);
 
-        // I want to track how many of the samples are below the threshold and skip processing if the majority of the buffer is silence.
-        // I still want to stop the recorder loop if there are 3 seconds of silence.
-        // - Keep track of total number of low energy buffers.
-        // - If we are currently recording and low energy count exceeds threshold and 3 seconds have passed since VAD start time, stop recording.
-        // - In loop_task_sound_recorder() if `iis_buffer_size`
         vad_total_count++;
         if (avg > vad_threshold) {
           //Serial.printf("Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", vad_low_energy_count, avg, recorder_task_handle != NULL);
@@ -1129,8 +1146,12 @@ void vad_task(void *pvParameters) {
           vad_low_energy_count++;
           vad_silence_count++;
           //Serial.printf("[VAD] %d:Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", millis() - vad_start_time, vad_low_energy_count, avg, recorder_task_handle != NULL);
-          if (recorder_task_handle != NULL && vad_low_energy_count >= VAD_LOW_COUNT && (millis() - vad_start_time >= 3000)) {
-            Serial.printf("[VAD] Stop recording.  VAD Low Energy: %d", vad_low_energy_count);
+          if (recorder_task_handle != NULL && vad_low_energy_count >= VAD_LOW_COUNT && (millis() - vad_start_time >= VAD_QUIET_TIME)) {
+            if (vad_total_count - vad_silence_count < 5) {
+              // Too little speech detected so far; do not stop recording yet
+              continue;
+            }
+            Serial.printf("[VAD] Stop recording.  VAD Low Energy: %d\n", vad_low_energy_count);
             stop_recorder_task();
             vad_task_handle = NULL;  // Disable VAD while processing the utterance
             vad_low_energy_count = 0;
