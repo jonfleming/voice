@@ -911,6 +911,7 @@ int is_recorder_task_running(void) {
 
 /* Main recording task loop */
 void loop_task_sound_recorder(void *pvParameters) {
+  Serial.printf("[Recorder] Task '%s' min free stack: %u bytes\n", pcTaskGetName(NULL), uxTaskGetStackHighWaterMark(NULL));
   // Print a message indicating the start of the recording task
   Serial.println("[Recorder] loop_task_sound_recorder start...");
   // Initialize the total size of recorded data
@@ -927,6 +928,8 @@ void loop_task_sound_recorder(void *pvParameters) {
 
   // Reset VAD start time
    vad_start_time = millis();
+   vad_total_count = 0;
+   vad_silence_count = 0;
 
   // Loop until a stop notification is received or handle is cleared
   while (!stop_requested && recorder_task_handle != NULL && !button_abort) {
@@ -936,7 +939,6 @@ void loop_task_sound_recorder(void *pvParameters) {
     int iis_buffer_size = audio_input_get_iis_data_available();
     // Loop while there is IIS data available
     while (iis_buffer_size > 0) {
-      Serial.printf("[Recorder] IIS buffer size: %d Total Count: %d Silence Count: %d\r\n", iis_buffer_size, vad_total_count, vad_silence_count);
       // Check for a stop notification (non-blocking) or if handle was cleared
       if (ulTaskNotifyTake(pdTRUE, 0) > 0 || recorder_task_handle == NULL) {
         Serial.println("[Recorder] Stop requested for recorder task");
@@ -971,6 +973,8 @@ void loop_task_sound_recorder(void *pvParameters) {
     vTaskDelay(10 / portTICK_PERIOD_MS);  // Small delay to prevent busy loop
   }
 
+  Serial.printf("[Recorder] wav buffer size: %d Total Count: %d Silence Count: %d\r\n", total_size, vad_total_count, vad_silence_count);
+  
   if (!button_abort) {
     request_display_line1("Processing...");
     last_recorded_size = total_size;
@@ -1024,6 +1028,8 @@ int is_player_task_running(void) {
 
 /* Main player task loop */
 void loop_task_play_handle(void *pvParameters) {
+  Serial.printf("[Player] Task '%s' min free stack: %u bytes\n", pcTaskGetName(NULL), uxTaskGetStackHighWaterMark(NULL));
+
   // Print a message indicating the start of the player task
   Serial.println("[Player] loop_task_play_handle start...");
   bool stop_requested = false;
@@ -1056,6 +1062,7 @@ void loop_task_play_handle(void *pvParameters) {
 /* VAD task for automatic voice activity detection */
 void vad_task(void *pvParameters) {
   char buffer[1024];  // 128 stereo samples * 8 bytes = 1024 bytes
+  Serial.printf("[VAD] Task '%s' min free stack: %u bytes\n", pcTaskGetName(NULL), uxTaskGetStackHighWaterMark(NULL));
 
   while (true) {
     // Skip processing if VAD is disabled (handle is NULL) or button is pressed or player is active
@@ -1110,7 +1117,7 @@ void vad_task(void *pvParameters) {
         // - In loop_task_sound_recorder() if `iis_buffer_size`
         vad_total_count++;
         if (avg > vad_threshold) {
-          Serial.printf("Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", vad_low_energy_count, avg, recorder_task_handle != NULL);
+          //Serial.printf("Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", vad_low_energy_count, avg, recorder_task_handle != NULL);
           vad_low_energy_count = 0;
           if (recorder_task_handle == NULL) {
             vad_start_time = millis();  // Start the timer when threshold is met
@@ -1121,7 +1128,7 @@ void vad_task(void *pvParameters) {
         } else {
           vad_low_energy_count++;
           vad_silence_count++;
-          Serial.printf("[VAD] %d:Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", millis() - vad_start_time, vad_low_energy_count, avg, recorder_task_handle != NULL);
+          //Serial.printf("[VAD] %d:Recording... VAD Low Energy: %d VAD avg: %d Recording: %d\n", millis() - vad_start_time, vad_low_energy_count, avg, recorder_task_handle != NULL);
           if (recorder_task_handle != NULL && vad_low_energy_count >= VAD_LOW_COUNT && (millis() - vad_start_time >= 3000)) {
             Serial.printf("[VAD] Stop recording.  VAD Low Energy: %d", vad_low_energy_count);
             stop_recorder_task();
