@@ -37,6 +37,20 @@ class VoiceAssistant:
     def __init__(self):
         self.audio = pyaudio.PyAudio()
         
+    def flush_input(self):
+        """Flush any existing audio input to avoid processing old data"""
+        stream = self.audio.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNK
+        )
+        data = stream.read(CHUNK)
+        stream.stop_stream()
+        stream.close()
+        time.sleep(0.1)
+        
     def record_audio(self):
         """Record audio from microphone until silence is detected"""
         print("Listening... (speak now)")
@@ -60,6 +74,10 @@ class VoiceAssistant:
             # Check for silence
             audio_data = sum(abs(int.from_bytes(data[i:i+2], 'little', signed=True)) 
                            for i in range(0, len(data), 2)) / (len(data) / 2)
+
+            # Clear the current line before printing status
+            print("\033[K", end="")
+            print(f"Audio level: {audio_data:.2f} silent chunks: {silent_chunks}", end='\r')
             
             if audio_data < SILENCE_THRESHOLD:
                 silent_chunks += 1
@@ -300,6 +318,7 @@ class VoiceAssistant:
                 
                 # Convert to speech and play
                 self.text_to_speech(response)
+                self.flush_input()  
                 
                 print("\n" + "="*50 + "\n")
                 
