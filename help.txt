@@ -1,0 +1,71 @@
+Help on class AudioProcessingModule in module webrtc_audio_processing.webrtc_audio_processing:
+
+class AudioProcessingModule(builtins.object)
+ |  AudioProcessingModule(aec_type=0, enable_ns=False, agc_type=0, enable_vad=False)
+ |  
+ |  Methods defined here:
+ |  
+ |  __del__ lambda self
+ |  
+ |  __getattr__ lambda self, name
+ |  
+ |  __init__(self, aec_type=0, enable_ns=False, agc_type=0, enable_vad=False)
+ |      Initialize self.  See help(type(self)) for accurate signature.
+ |  
+ |  __repr__ = _swig_repr(self) from webrtc_audio_processing.webrtc_audio_processing
+ |  
+ |  __setattr__ lambda self, name, value
+ |  
+ |  aec_level(self)
+ |  
+ |  agc_level(self)
+ |  
+ |  has_echo(self)
+ |  
+ |  has_voice(self)
+ |  
+ |  ns_level(self)
+ |  
+ |  process_reverse_stream(self, *args)
+ |  
+ |  process_stream(self, *args)
+ |  
+ |  set_aec_level(self, *args)
+ |  
+ |  set_agc_level(self, *args)
+ |  
+ |  set_agc_target(self, *args)
+ |  
+ |  set_ns_level(self, *args)
+ |  
+ |  set_reverse_stream_format(self, *args)
+ |  
+ |  set_stream_format(self, *args)
+ |  
+ |  set_system_delay(self, *args)
+ |  
+ |  set_vad_level(self, *args)
+ |  
+ |  vad_level(self)
+ |  
+ |  ----------------------------------------------------------------------
+ |  Static methods defined here:
+ |  
+ |  __swig_destroy__ = delete_AudioProcessingModule(...)
+ |  
+ |  ----------------------------------------------------------------------
+ |  Data descriptors defined here:
+ |  
+ |  __dict__
+ |      dictionary for instance variables
+ |  
+ |  __weakref__
+ |      list of weak references to the object
+ |  
+ |  ----------------------------------------------------------------------
+ |  Data and other attributes defined here:
+ |  
+ |  __swig_getmethods__ = {}
+ |  
+ |  __swig_setmethods__ = {}
+

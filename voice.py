@@ -4,15 +4,12 @@ Voice Assistant for Raspberry Pi 5
 Integrates Wyoming Faster Whisper, Ollama, and Wyoming Piper
 """
 
-import asyncio
 import wave
 import io
 import pyaudio
 import requests
-import json
 import subprocess
 import shutil
-from pathlib import Path
 import select
 import sys
 import time
