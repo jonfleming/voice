@@ -13,6 +13,9 @@ import json
 import subprocess
 import shutil
 from pathlib import Path
+import select
+import sys
+import time
 
 # Configuration - Update these with your server details
 SERVER_IP = "192.168.0.108"  # Replace with your server IP
@@ -169,32 +172,82 @@ class VoiceAssistant:
         """Play audio through the speaker"""
         print("Playing audio...")
         
-        # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
-        if not audio_data.startswith(b'RIFF'):
-            try:
-                audio_data = self._convert_to_wav_ffmpeg(audio_data)
-            except Exception as e:
-                print(f"TTS conversion error: {e}")
-                return
-
-        # Parse WAV data
-        with wave.open(io.BytesIO(audio_data), 'rb') as wf:
-            stream = self.audio.open(
-                format=self.audio.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True
-            )
-            
-            data = wf.readframes(CHUNK)
-            while data:
-                stream.write(data)
-                data = wf.readframes(CHUNK)
-            
-            stream.stop_stream()
-            stream.close()
+        # Mute microphone to prevent feedback
+        self._mute_mic()
         
-        print("Playback complete")
+        try:
+            # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
+            if not audio_data.startswith(b'RIFF'):
+                try:
+                    audio_data = self._convert_to_wav_ffmpeg(audio_data)
+                except Exception as e:
+                    print(f"TTS conversion error: {e}")
+                    return
+
+            # Parse WAV data
+            with wave.open(io.BytesIO(audio_data), 'rb') as wf:
+                stream = self.audio.open(
+                    format=self.audio.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True
+                )
+                
+                data = wf.readframes(CHUNK)
+                while data:
+                    stream.write(data)
+                    
+                    # Check for keyboard interrupt
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        # Consume the key press
+                        key = sys.stdin.read(1)
+                        print("Playback interrupted by key press")
+                        break
+                    
+                    data = wf.readframes(CHUNK)
+                
+                stream.stop_stream()
+                stream.close()
+            
+            print("Playback complete")
+        finally:
+            # Small delay to allow audio to fully stop before unmuting mic
+            print("Waiting for audio to settle...")
+            time.sleep(1.0)
+            # Unmute microphone
+            self._unmute_mic()
+    
+    def _mute_mic(self):
+        """Mute the microphone to prevent feedback during playback"""
+        try:
+            # Try PulseAudio first (common on modern Linux)
+            subprocess.run(['pactl', 'set-source-mute', '@DEFAULT_SOURCE@', '1'], 
+                         check=True, capture_output=True)
+            print("Microphone muted (PulseAudio)")
+        except subprocess.CalledProcessError:
+            try:
+                # Fallback to ALSA
+                subprocess.run(['amixer', 'set', 'Capture', 'nocap'], 
+                             check=True, capture_output=True)
+                print("Microphone muted (ALSA)")
+            except subprocess.CalledProcessError:
+                print("Warning: Could not mute microphone")
+    
+    def _unmute_mic(self):
+        """Unmute the microphone after playback"""
+        try:
+            # Try PulseAudio first
+            subprocess.run(['pactl', 'set-source-mute', '@DEFAULT_SOURCE@', '0'], 
+                         check=True, capture_output=True)
+            print("Microphone unmuted (PulseAudio)")
+        except subprocess.CalledProcessError:
+            try:
+                # Fallback to ALSA
+                subprocess.run(['amixer', 'set', 'Capture', 'cap'], 
+                             check=True, capture_output=True)
+                print("Microphone unmuted (ALSA)")
+            except subprocess.CalledProcessError:
+                print("Warning: Could not unmute microphone")
 
     def _convert_to_wav_ffmpeg(self, audio_bytes: bytes) -> bytes:
         """Convert arbitrary audio bytes to WAV using ffmpeg (requires ffmpeg on PATH).

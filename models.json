@@ -1,0 +1,461 @@
+{
+  "data": [
+    {
+      "id": "speaches-ai/Kokoro-82M-v1.0-ONNX",
+      "created": 1767941087,
+      "object": "model",
+      "owned_by": "speaches-ai",
+      "language": [
+        "multilingual"
+      ],
+      "task": "text-to-speech",
+      "sample_rate": 24000,
+      "voices": [
+        {
+          "name": "af_heart",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_heart"
+        },
+        {
+          "name": "af_alloy",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_alloy"
+        },
+        {
+          "name": "af_aoede",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_aoede"
+        },
+        {
+          "name": "af_bella",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_bella"
+        },
+        {
+          "name": "af_jessica",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_jessica"
+        },
+        {
+          "name": "af_kore",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_kore"
+        },
+        {
+          "name": "af_nicole",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_nicole"
+        },
+        {
+          "name": "af_nova",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_nova"
+        },
+        {
+          "name": "af_river",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_river"
+        },
+        {
+          "name": "af_sarah",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_sarah"
+        },
+        {
+          "name": "af_sky",
+          "language": "en-us",
+          "gender": "female",
+          "id": "af_sky"
+        },
+        {
+          "name": "am_adam",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_adam"
+        },
+        {
+          "name": "am_echo",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_echo"
+        },
+        {
+          "name": "am_eric",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_eric"
+        },
+        {
+          "name": "am_fenrir",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_fenrir"
+        },
+        {
+          "name": "am_liam",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_liam"
+        },
+        {
+          "name": "am_michael",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_michael"
+        },
+        {
+          "name": "am_onyx",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_onyx"
+        },
+        {
+          "name": "am_puck",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_puck"
+        },
+        {
+          "name": "am_santa",
+          "language": "en-us",
+          "gender": "male",
+          "id": "am_santa"
+        },
+        {
+          "name": "bf_alice",
+          "language": "en-gb",
+          "gender": "female",
+          "id": "bf_alice"
+        },
+        {
+          "name": "bf_emma",
+          "language": "en-gb",
+          "gender": "female",
+          "id": "bf_emma"
+        },
+        {
+          "name": "bf_isabella",
+          "language": "en-gb",
+          "gender": "female",
+          "id": "bf_isabella"
+        },
+        {
+          "name": "bf_lily",
+          "language": "en-gb",
+          "gender": "female",
+          "id": "bf_lily"
+        },
+        {
+          "name": "bm_daniel",
+          "language": "en-gb",
+          "gender": "male",
+          "id": "bm_daniel"
+        },
+        {
+          "name": "bm_fable",
+          "language": "en-gb",
+          "gender": "male",
+          "id": "bm_fable"
+        },
+        {
+          "name": "bm_george",
+          "language": "en-gb",
+          "gender": "male",
+          "id": "bm_george"
+        },
+        {
+          "name": "bm_lewis",
+          "language": "en-gb",
+          "gender": "male",
+          "id": "bm_lewis"
+        },
+        {
+          "name": "jf_alpha",
+          "language": "ja",
+          "gender": "female",
+          "id": "jf_alpha"
+        },
+        {
+          "name": "jf_gongitsune",
+          "language": "ja",
+          "gender": "female",
+          "id": "jf_gongitsune"
+        },
+        {
+          "name": "jf_nezumi",
+          "language": "ja",
+          "gender": "female",
+          "id": "jf_nezumi"
+        },
+        {
+          "name": "jf_tebukuro",
+          "language": "ja",
+          "gender": "female",
+          "id": "jf_tebukuro"
+        },
+        {
+          "name": "jm_kumo",
+          "language": "ja",
+          "gender": "male",
+          "id": "jm_kumo"
+        },
+        {
+          "name": "zf_xiaobei",
+          "language": "zh",
+          "gender": "female",
+          "id": "zf_xiaobei"
+        },
+        {
+          "name": "zf_xiaoni",
+          "language": "zh",
+          "gender": "female",
+          "id": "zf_xiaoni"
+        },
+        {
+          "name": "zf_xiaoxiao",
+          "language": "zh",
+          "gender": "female",
+          "id": "zf_xiaoxiao"
+        },
+        {
+          "name": "zf_xiaoyi",
+          "language": "zh",
+          "gender": "female",
+          "id": "zf_xiaoyi"
+        },
+        {
+          "name": "zm_yunjian",
+          "language": "zh",
+          "gender": "male",
+          "id": "zm_yunjian"
+        },
+        {
+          "name": "zm_yunxi",
+          "language": "zh",
+          "gender": "male",
+          "id": "zm_yunxi"
+        },
+        {
+          "name": "zm_yunxia",
+          "language": "zh",
+          "gender": "male",
+          "id": "zm_yunxia"
+        },
+        {
+          "name": "zm_yunyang",
+          "language": "zh",
+          "gender": "male",
+          "id": "zm_yunyang"
+        },
+        {
+          "name": "ef_dora",
+          "language": "es",
+          "gender": "female",
+          "id": "ef_dora"
+        },
+        {
+          "name": "em_alex",
+          "language": "es",
+          "gender": "male",
+          "id": "em_alex"
+        },
+        {
+          "name": "em_santa",
+          "language": "es",
+          "gender": "male",
+          "id": "em_santa"
+        },
+        {
+          "name": "ff_siwis",
+          "language": "fr-fr",
+          "gender": "female",
+          "id": "ff_siwis"
+        },
+        {
+          "name": "hf_alpha",
+          "language": "hi",
+          "gender": "female",
+          "id": "hf_alpha"
+        },
+        {
+          "name": "hf_beta",
+          "language": "hi",
+          "gender": "female",
+          "id": "hf_beta"
+        },
+        {
+          "name": "hm_omega",
+          "language": "hi",
+          "gender": "male",
+          "id": "hm_omega"
+        },
+        {
+          "name": "hm_psi",
+          "language": "hi",
+          "gender": "male",
+          "id": "hm_psi"
+        },
+        {
+          "name": "if_sara",
+          "language": "it",
+          "gender": "female",
+          "id": "if_sara"
+        },
+        {
+          "name": "im_nicola",
+          "language": "it",
+          "gender": "male",
+          "id": "im_nicola"
+        },
+        {
+          "name": "pf_dora",
+          "language": "pt-br",
+          "gender": "female",
+          "id": "pf_dora"
+        },
+        {
+          "name": "pm_alex",
+          "language": "pt-br",
+          "gender": "male",
+          "id": "pm_alex"
+        },
+        {
+          "name": "pm_santa",
+          "language": "pt-br",
+          "gender": "male",
+          "id": "pm_santa"
+        }
+      ]
+    },
+    {
+      "id": "Systran/faster-whisper-large-v3",
+      "created": 1767948095,
+      "object": "model",
+      "owned_by": "Systran",
+      "language": [
+        "en",
+        "zh",
+        "de",
+        "es",
+        "ru",
+        "ko",
+        "fr",
+        "ja",
+        "pt",
+        "tr",
+        "pl",
+        "ca",
+        "nl",
+        "ar",
+        "sv",
+        "it",
+        "id",
+        "hi",
+        "fi",
+        "vi",
+        "he",
+        "uk",
+        "el",
+        "ms",
+        "cs",
+        "ro",
+        "da",
+        "hu",
+        "ta",
+        "no",
+        "th",
+        "ur",
+        "hr",
+        "bg",
+        "lt",
+        "la",
+        "mi",
+        "ml",
+        "cy",
+        "sk",
+        "te",
+        "fa",
+        "lv",
+        "bn",
+        "sr",
+        "az",
+        "sl",
+        "kn",
+        "et",
+        "mk",
+        "br",
+        "eu",
+        "is",
+        "hy",
+        "ne",
+        "mn",
+        "bs",
+        "kk",
+        "sq",
+        "sw",
+        "gl",
+        "mr",
+        "pa",
+        "si",
+        "km",
+        "sn",
+        "yo",
+        "so",
+        "af",
+        "oc",
+        "ka",
+        "be",
+        "tg",
+        "sd",
+        "gu",
+        "am",
+        "yi",
+        "lo",
+        "uz",
+        "fo",
+        "ht",
+        "ps",
+        "tk",
+        "nn",
+        "mt",
+        "sa",
+        "lb",
+        "my",
+        "bo",
+        "tl",
+        "mg",
+        "as",
+        "tt",
+        "haw",
+        "ln",
+        "ha",
+        "ba",
+        "jw",
+        "su",
+        "yue"
+      ],
+      "task": "automatic-speech-recognition"
+    },
+    {
+      "id": "Systran/faster-distil-whisper-small.en",
+      "created": 1767938335,
+      "object": "model",
+      "owned_by": "Systran",
+      "language": [
+        "en"
+      ],
+      "task": "automatic-speech-recognition"
+    }
+  ],
+  "object": "list"
+}
