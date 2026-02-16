@@ -46,51 +46,57 @@ class VoiceAssistant:
             input=True,
             frames_per_buffer=CHUNK
         )
-        data = stream.read(CHUNK)
+        stream.read(CHUNK, exception_on_overflow=False)
         stream.stop_stream()
         stream.close()
         time.sleep(0.1)
         
     def record_audio(self):
-        """Record audio from microphone until silence is detected"""
+        """Record audio from microphone until silence is detected (non-blocking callback)"""
         print("Listening... (speak now)")
-        
+
+        frames = []
+        silent_chunks = 0
+        silence_limit = int(SILENCE_DURATION * RATE / CHUNK)
+        max_chunks = int(RATE / CHUNK * RECORD_SECONDS)
+        state = {'done': False, 'silent_chunks': 0, 'chunks': 0, 'audio_level': 0}
+
+        def callback(in_data, frame_count, time_info, status):
+            frames.append(in_data)
+            # Check for silence
+            audio_data = sum(abs(int.from_bytes(in_data[i:i+2], 'little', signed=True))
+                            for i in range(0, len(in_data), 2)) / (len(in_data) / 2)
+            state['audio_level'] = audio_data
+            if audio_data < SILENCE_THRESHOLD:
+                state['silent_chunks'] += 1
+            else:
+                state['silent_chunks'] = 0
+            state['chunks'] += 1
+            # Print status
+            print("\033[K", end="")
+            print(f"Audio level: {audio_data:.2f} silent chunks: {state['silent_chunks']}", end='\r')
+            # Stop if silence or max chunks
+            if state['silent_chunks'] > silence_limit or state['chunks'] >= max_chunks:
+                state['done'] = True
+                return (in_data, pyaudio.paComplete)
+            return (in_data, pyaudio.paContinue)
+
         stream = self.audio.open(
             format=FORMAT,
             channels=CHANNELS,
             rate=RATE,
             input=True,
-            frames_per_buffer=CHUNK
+            frames_per_buffer=CHUNK,
+            stream_callback=callback
         )
-        
-        frames = []
-        silent_chunks = 0
-        silence_limit = int(SILENCE_DURATION * RATE / CHUNK)
-        
-        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-            data = stream.read(CHUNK)
-            frames.append(data)
-            
-            # Check for silence
-            audio_data = sum(abs(int.from_bytes(data[i:i+2], 'little', signed=True)) 
-                           for i in range(0, len(data), 2)) / (len(data) / 2)
 
-            # Clear the current line before printing status
-            print("\033[K", end="")
-            print(f"Audio level: {audio_data:.2f} silent chunks: {silent_chunks}", end='\r')
-            
-            if audio_data < SILENCE_THRESHOLD:
-                silent_chunks += 1
-            else:
-                silent_chunks = 0
-            
-            if silent_chunks > silence_limit:
-                break
-        
+        stream.start_stream()
+        while stream.is_active() and not state['done']:
+            time.sleep(0.05)
         stream.stop_stream()
         stream.close()
         print("Recording complete")
-        
+
         # Convert to WAV format
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wf:
@@ -98,7 +104,7 @@ class VoiceAssistant:
             wf.setsampwidth(self.audio.get_sample_size(FORMAT))
             wf.setframerate(RATE)
             wf.writeframes(b''.join(frames))
-        
+
         return wav_buffer.getvalue()
     
     def transcribe_audio(self, audio_data):

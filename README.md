@@ -21,7 +21,7 @@ sudo apt install -y portaudio19-dev
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip build-essential portaudio19-dev libsndfile1 ffmpeg
-sudo apt install -y portaudio19-dev python3-dev
+sudo apt install -y portaudio19-dev python3-dev pulseaudio-utils
 ```
 
 **Python Environment and Python Packages**
