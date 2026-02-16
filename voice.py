@@ -13,6 +13,9 @@ import shutil
 import select
 import sys
 import time
+import sounddevice as sd
+import soundfile as sf
+import numpy as np
 
 # Configuration - Update these with your server details
 SERVER_IP = "192.168.0.108"  # Replace with your server IP
@@ -190,12 +193,12 @@ class VoiceAssistant:
             print(f"TTS error: {e}")
     
     def play_audio(self, audio_data):
-        """Play audio through the speaker"""
+        """Play audio using sounddevice instead of PyAudio."""
         print("Playing audio...")
-        
+
         # Mute microphone to prevent feedback
         self._mute_mic()
-        
+
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -205,39 +208,28 @@ class VoiceAssistant:
                     print(f"TTS conversion error: {e}")
                     return
 
-            # Parse WAV data
-            with wave.open(io.BytesIO(audio_data), 'rb') as wf:
-                stream = self.audio.open(
-                    format=self.audio.get_format_from_width(wf.getsampwidth()),
-                    channels=wf.getnchannels(),
-                    rate=wf.getframerate(),
-                    output=True
-                )
-                
-                data = wf.readframes(CHUNK)
-                while data:
-                    stream.write(data)
-                    
-                    # Check for keyboard interrupt
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        # Consume the key press
-                        key = sys.stdin.read(1)
-                        print("Playback interrupted by key press")
-                        break
-                    
-                    data = wf.readframes(CHUNK)
-                
-                stream.stop_stream()
-                stream.close()
-            
+            # Decode WAV bytes into numpy array + samplerate
+            try:
+                wav_io = io.BytesIO(audio_data)
+                audio_array, samplerate = sf.read(wav_io, dtype="float32")
+            except Exception as e:
+                print(f"Error decoding WAV: {e}")
+                return
+
+            # Ensure audio is 2D (sounddevice expects (samples, channels))
+            if audio_array.ndim == 1:
+                audio_array = np.expand_dims(audio_array, axis=1)
+
+            # Play audio
+            sd.play(audio_array, samplerate=samplerate, blocking=True)
+
             print("Playback complete")
+
         finally:
-            # Small delay to allow audio to fully stop before unmuting mic
             print("Waiting for audio to settle...")
             time.sleep(1.0)
-            # Unmute microphone
             self._unmute_mic()
-    
+
     def _mute_mic(self):
         """Mute the microphone to prevent feedback during playback"""
         try:
