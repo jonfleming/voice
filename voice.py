@@ -13,6 +13,7 @@ import shutil
 import select
 import sys
 import time
+from pvspeaker import PvSpeaker
 
 # Configuration - Update these with your server details
 SERVER_IP = "192.168.0.108"  # Replace with your server IP
@@ -184,12 +185,9 @@ class VoiceAssistant:
             print(f"TTS error: {e}")
     
     def play_audio(self, audio_data):
-        """Play audio through the speaker"""
-        print("Playing audio...")
-        
-        # Mute microphone to prevent feedback
+        """Play audio through the speaker using PvSpeaker (Picovoice)"""
+        print("Playing audio with PvSpeaker...")
         self._mute_mic()
-        
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -199,37 +197,38 @@ class VoiceAssistant:
                     print(f"TTS conversion error: {e}")
                     return
 
-            # Parse WAV data
             with wave.open(io.BytesIO(audio_data), 'rb') as wf:
-                stream = self.audio.open(
-                    format=self.audio.get_format_from_width(wf.getsampwidth()),
-                    channels=wf.getnchannels(),
-                    rate=wf.getframerate(),
-                    output=True
+                sample_rate = wf.getframerate()
+                bits_per_sample = wf.getsampwidth() * 8
+                channels = wf.getnchannels()
+                n_frames = wf.getnframes()
+                print(f"Audio format: {bits_per_sample} bits, {sample_rate} Hz, {channels} channels, {n_frames} frames")
+
+                if channels != 1:
+                    print("PvSpeaker currently only supports mono (1 channel) audio.")
+                    return
+
+                speaker = PvSpeaker(
+                    sample_rate=sample_rate,
+                    bits_per_sample=bits_per_sample
                 )
-                
-                data = wf.readframes(CHUNK)
-                while data:
-                    stream.write(data)
-                    
-                    # Check for keyboard interrupt
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        # Consume the key press
-                        key = sys.stdin.read(1)
-                        print("Playback interrupted by key press")
-                        break
-                    
-                    data = wf.readframes(CHUNK)
-                
-                stream.stop_stream()
-                stream.close()
-            
+                speaker.start()
+                # Read all PCM data at once for correct buffer handling
+                pcm_data = wf.readframes(n_frames)
+                total_written = 0
+                frame_size = wf.getsampwidth()
+                # Write in chunks, as in pv.py
+                while total_written < len(pcm_data):
+                    written = speaker.write(pcm_data[total_written:total_written+CHUNK*frame_size])
+                    total_written += written
+                    if total_written < len(pcm_data):
+                        time.sleep(0.01)
+                speaker.flush()
+                speaker.stop()
             print("Playback complete")
         finally:
-            # Small delay to allow audio to fully stop before unmuting mic
             print("Waiting for audio to settle...")
             time.sleep(1.0)
-            # Unmute microphone
             self._unmute_mic()
     
     def _mute_mic(self):
