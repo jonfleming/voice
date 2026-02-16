@@ -8,20 +8,12 @@ A small voice assistant that integrates Wyoming Faster Whisper (STT), Ollama (LL
 - **Python:** 3.8+ recommended.
 
 **Install System Dependencies (Debian/Ubuntu)**
-- Option A — install distro packages (easiest):
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-pyaudio ffmpeg
-sudo apt install -y portaudio19-dev
-```
-
-- Option B — if you prefer to build `pyaudio` from pip:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip build-essential portaudio19-dev libsndfile1 ffmpeg
-sudo apt install -y portaudio19-dev python3-dev pulseaudio-utils
+sudo apt install -y portaudio19-dev portaudio19-dev libpulse-dev pulseaudio-utils
+sudo apt install jackd2 libjack-jackd2-dev
 ```
 
 **Python Environment and Python Packages**
@@ -38,9 +30,8 @@ uv venv
 source .venv/bin/activate
 uv add requests
 CC=gcc CXX=g++ uv add pyaudio
+uv add --reinstall --no-binary pyaudio
 ```
-
-Note: If you installed `python3-pyaudio` via `apt` (Option A), you may not need to `pip install pyaudio`.
 
 **Configuration**
 - Open `voice.py` and edit the top configuration variables as needed:
