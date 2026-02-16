@@ -21,16 +21,23 @@ sudo apt install -y portaudio19-dev
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip build-essential portaudio19-dev libsndfile1 ffmpeg
+sudo apt install -y portaudio19-dev python3-dev
 ```
 
 **Python Environment and Python Packages**
 - Create and activate a virtual environment, upgrade pip, and install required Python packages.
 
+**Install UV**
 ```bash
-python3 -m venv .venv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**pyaudio**
+```bash
+uv venv
 source .venv/bin/activate
-pip install --upgrade pip
-pip install requests pyaudio
+uv add requests
+CC=gcc CXX=g++ uv add pyaudio
 ```
 
 Note: If you installed `python3-pyaudio` via `apt` (Option A), you may not need to `pip install pyaudio`.
