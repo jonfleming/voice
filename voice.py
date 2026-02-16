@@ -10,6 +10,7 @@ import pyaudio
 import requests
 import subprocess
 import shutil
+import array
 import select
 import sys
 import time
@@ -188,6 +189,10 @@ class VoiceAssistant:
         """Play audio through the speaker using PvSpeaker (Picovoice)"""
         print("Playing audio with PvSpeaker...")
         self._mute_mic()
+
+        with open('test_output.wav', 'wb') as f:
+            f.write(audio_data)
+        
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -215,13 +220,15 @@ class VoiceAssistant:
                 speaker.start()
                 # Read all PCM data at once for correct buffer handling
                 pcm_data = wf.readframes(n_frames)
+                pcm_array = array.array('h')  # 'h' for signed 16-bit integers (matches your 16-bit audio)
+                pcm_array.frombytes(pcm_data)
                 total_written = 0
                 frame_size = wf.getsampwidth()
                 # Write in chunks, as in pv.py
-                while total_written < len(pcm_data):
-                    written = speaker.write(pcm_data[total_written:total_written+CHUNK*frame_size])
+                while total_written < len(pcm_array):
+                    written = speaker.write(pcm_array[total_written:total_written+CHUNK*frame_size])
                     total_written += written
-                    if total_written < len(pcm_data):
+                    if total_written < len(pcm_array):
                         time.sleep(0.01)
                 speaker.flush()
                 speaker.stop()
@@ -277,7 +284,7 @@ class VoiceAssistant:
             '-loglevel', 'error',
             '-i', 'pipe:0',
             '-f', 'wav',
-            '-ar', str(RATE),
+            '-ar', str(48000),  # Output sample rate
             '-ac', str(CHANNELS),
             'pipe:1'
         ]
