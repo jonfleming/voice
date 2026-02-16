@@ -193,12 +193,9 @@ class VoiceAssistant:
             print(f"TTS error: {e}")
     
     def play_audio(self, audio_data):
-        """Play audio using sounddevice instead of PyAudio."""
+        """Save Piper TTS response to a .wav file and play it using a subprocess."""
         print("Playing audio...")
-
-        # Mute microphone to prevent feedback
         self._mute_mic()
-
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -208,23 +205,29 @@ class VoiceAssistant:
                     print(f"TTS conversion error: {e}")
                     return
 
-            # Decode WAV bytes into numpy array + samplerate
+            # Save to temporary WAV file
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
+                tmp_wav.write(audio_data)
+                tmp_wav_path = tmp_wav.name
+
+            # Play using a subprocess (aplay or ffplay)
             try:
-                wav_io = io.BytesIO(audio_data)
-                audio_array, samplerate = sf.read(wav_io, dtype="float32")
+                # Prefer aplay if available, else ffplay
+                if shutil.which('aplay'):
+                    subprocess.run(['aplay', tmp_wav_path], check=True)
+                elif shutil.which('ffplay'):
+                    subprocess.run(['ffplay', '-nodisp', '-autoexit', tmp_wav_path], check=True)
+                else:
+                    print("No suitable audio player found (aplay or ffplay required)")
             except Exception as e:
-                print(f"Error decoding WAV: {e}")
-                return
-
-            # Ensure audio is 2D (sounddevice expects (samples, channels))
-            if audio_array.ndim == 1:
-                audio_array = np.expand_dims(audio_array, axis=1)
-
-            # Play audio
-            sd.play(audio_array, samplerate=samplerate, blocking=True)
+                print(f"Audio playback error: {e}")
+            finally:
+                # Remove temp file
+                import os
+                os.remove(tmp_wav_path)
 
             print("Playback complete")
-
         finally:
             print("Waiting for audio to settle...")
             time.sleep(1.0)
