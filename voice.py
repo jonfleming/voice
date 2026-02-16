@@ -10,12 +10,7 @@ import pyaudio
 import requests
 import subprocess
 import shutil
-import select
-import sys
 import time
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
 
 # Configuration - Update these with your server details
 SERVER_IP = "192.168.0.108"  # Replace with your server IP
