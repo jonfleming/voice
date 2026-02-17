@@ -76,7 +76,16 @@ class VoiceAssistant:
         silence_limit = int(SILENCE_DURATION * RATE / CHUNK)
         
         for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-            data = stream.read(CHUNK)
+            try:
+                # prevent exception on overflow from crashing the loop
+                data = stream.read(CHUNK, exception_on_overflow=False)
+            except OSError as e:
+                # insert a silent chunk to keep timing consistent
+                print(f"Audio input overflow/read error: {e}; inserting silence chunk")
+                sample_width = self.audio.get_sample_size(FORMAT)
+                silence = b'\x00' * CHUNK * sample_width * CHANNELS
+                data = silence
+
             frames.append(data)
             
             # Check for silence
