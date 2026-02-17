@@ -209,8 +209,8 @@ class VoiceAssistant:
             # Play using a subprocess (aplay or ffplay)
             try:
                 # Prefer aplay if available, else ffplay
-                if shutil.which('aplay'):
-                    subprocess.run(['aplay', tmp_wav_path], check=True)
+                if shutil.which('paplay'):
+                    subprocess.run(['paplay', tmp_wav_path], check=True)
                 elif shutil.which('ffplay'):
                     subprocess.run(['ffplay', '-nodisp', '-autoexit', tmp_wav_path], check=True)
                 else:
