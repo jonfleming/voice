@@ -32,8 +32,18 @@ SILENCE_THRESHOLD = 500  # Adjust based on your environment
 SILENCE_DURATION = 2  # Seconds of silence to stop recording
 
 class VoiceAssistant:
-    def __init__(self):
+    def __init__(self, keep_temp_wav: bool | None = None):
+        """
+        keep_temp_wav: when True, temporary .wav files created for playback are kept on disk.
+        If None, the environment variable VOICE_KEEP_WAV is consulted (1/true/yes to enable).
+        """
+        import os
         self.audio = pyaudio.PyAudio()
+        if keep_temp_wav is None:
+            val = os.getenv('VOICE_KEEP_WAV', '0').lower()
+            self.keep_temp_wav = val in ('1', 'true', 'yes', 'y')
+        else:
+            self.keep_temp_wav = bool(keep_temp_wav)
         
     def flush_input(self):
         """Flush any existing audio input to avoid processing old data"""
@@ -44,8 +54,7 @@ class VoiceAssistant:
             input=True,
             frames_per_buffer=CHUNK
         )
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        print(f"Flushed {len(data)} bytes of audio input {data[:10]}...")
+        stream.read(CHUNK, exception_on_overflow=False)
         stream.stop_stream()
         stream.close()
         time.sleep(0.1)
@@ -68,7 +77,6 @@ class VoiceAssistant:
         
         for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
             data = stream.read(CHUNK)
-            print(f"Read {len(data)} bytes of audio input {data[:10]}...")
             frames.append(data)
             
             # Check for silence
@@ -181,7 +189,12 @@ class VoiceAssistant:
             print(f"TTS error: {e}")
     
     def play_audio(self, audio_data):
-        """Save Piper TTS response to a .wav file and play it using a subprocess. Allow Ctrl-C to interrupt playback only."""
+        """Save Piper TTS response to a .wav file and play it using a subprocess.
+
+        If `self.keep_temp_wav` is True (or VOICE_KEEP_WAV env var set), the temporary
+        .wav file will be kept on disk for debugging/testing. Allow Ctrl-C to
+        interrupt playback only.
+        """
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -195,6 +208,7 @@ class VoiceAssistant:
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
                 tmp_wav.write(audio_data)
                 tmp_wav_path = tmp_wav.name
+                print(f"Saved TTS audio to {tmp_wav_path}")
 
             # Play using a subprocess (paplay or ffplay), allow interruption
             player_cmd = None
@@ -205,7 +219,10 @@ class VoiceAssistant:
             else:
                 print("No suitable audio player found (paplay or ffplay required)")
                 import os
-                os.remove(tmp_wav_path)
+                if self.keep_temp_wav:
+                    print(f"Kept WAV file at {tmp_wav_path} (no player available)")
+                else:
+                    os.remove(tmp_wav_path)
                 return
 
             proc = None
@@ -225,7 +242,13 @@ class VoiceAssistant:
                 print(f"Audio playback error: {e}")
             finally:
                 import os
-                os.remove(tmp_wav_path)
+                if self.keep_temp_wav:
+                    print(f"Kept WAV file at {tmp_wav_path}")
+                else:
+                    try:
+                        os.remove(tmp_wav_path)
+                    except OSError:
+                        pass
 
             print("Playback complete")
         finally:
@@ -304,6 +327,7 @@ class VoiceAssistant:
         print("\nPress Ctrl+C to exit\n")
         
         try:
+            self._unmute_mic()
             while True:
                 # Record audio
                 audio_data = self.record_audio()
@@ -330,5 +354,6 @@ class VoiceAssistant:
             self.audio.terminate()
 
 if __name__ == "__main__":
+    # assistant = VoiceAssistant(keep_temp_wav=True)
     assistant = VoiceAssistant()
     assistant.run()
