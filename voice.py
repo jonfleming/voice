@@ -44,57 +44,49 @@ class VoiceAssistant:
             input=True,
             frames_per_buffer=CHUNK
         )
-        stream.read(CHUNK, exception_on_overflow=False)
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        print(f"Flushed {len(data)} bytes of audio input {data[:10]}...")
         stream.stop_stream()
         stream.close()
         time.sleep(0.1)
         
     def record_audio(self):
-        """Record audio from microphone until silence is detected (non-blocking callback)"""
+        """Record audio from microphone until silence is detected"""
         print("Listening... (speak now)")
-
-        frames = []
-        silent_chunks = 0
-        silence_limit = int(SILENCE_DURATION * RATE / CHUNK)
-        max_chunks = int(RATE / CHUNK * RECORD_SECONDS)
-        state = {'done': False, 'silent_chunks': 0, 'chunks': 0, 'audio_level': 0}
-
-        def callback(in_data, frame_count, time_info, status):
-            frames.append(in_data)
-            # Check for silence
-            audio_data = sum(abs(int.from_bytes(in_data[i:i+2], 'little', signed=True))
-                            for i in range(0, len(in_data), 2)) / (len(in_data) / 2)
-            state['audio_level'] = audio_data
-            if audio_data < SILENCE_THRESHOLD:
-                state['silent_chunks'] += 1
-            else:
-                state['silent_chunks'] = 0
-            state['chunks'] += 1
-            # Print status
-            print("\033[K", end="")
-            print(f"Audio level: {audio_data:.2f} silent chunks: {state['silent_chunks']}", end='\r')
-            # Stop if silence or max chunks
-            if state['silent_chunks'] > silence_limit or state['chunks'] >= max_chunks:
-                state['done'] = True
-                return (in_data, pyaudio.paComplete)
-            return (in_data, pyaudio.paContinue)
-
+        
         stream = self.audio.open(
             format=FORMAT,
             channels=CHANNELS,
             rate=RATE,
             input=True,
-            frames_per_buffer=CHUNK,
-            stream_callback=callback
+            frames_per_buffer=CHUNK
         )
-
-        stream.start_stream()
-        while stream.is_active() and not state['done']:
-            time.sleep(0.05)
+        
+        frames = []
+        silent_chunks = 0
+        silence_limit = int(SILENCE_DURATION * RATE / CHUNK)
+        
+        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+            data = stream.read(CHUNK)
+            print(f"Read {len(data)} bytes of audio input {data[:10]}...")
+            frames.append(data)
+            
+            # Check for silence
+            audio_data = sum(abs(int.from_bytes(data[i:i+2], 'little', signed=True)) 
+                           for i in range(0, len(data), 2)) / (len(data) / 2)
+            
+            if audio_data < SILENCE_THRESHOLD:
+                silent_chunks += 1
+            else:
+                silent_chunks = 0
+            
+            if silent_chunks > silence_limit:
+                break
+        
         stream.stop_stream()
         stream.close()
         print("Recording complete")
-
+        
         # Convert to WAV format
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, 'wb') as wf:
@@ -102,8 +94,9 @@ class VoiceAssistant:
             wf.setsampwidth(self.audio.get_sample_size(FORMAT))
             wf.setframerate(RATE)
             wf.writeframes(b''.join(frames))
+        
+        return wav_buffer.getvalue()        
 
-        return wav_buffer.getvalue()
     
     def transcribe_audio(self, audio_data):
         """Send audio to Wyoming Faster Whisper for transcription"""
@@ -188,9 +181,7 @@ class VoiceAssistant:
             print(f"TTS error: {e}")
     
     def play_audio(self, audio_data):
-        """Save Piper TTS response to a .wav file and play it using a subprocess."""
-        print("Playing audio...")
-        self._mute_mic()
+        """Save Piper TTS response to a .wav file and play it using a subprocess. Allow Ctrl-C to interrupt playback only."""
         try:
             # If the data isn't a WAV (RIFF) try to convert it via ffmpeg
             if not audio_data.startswith(b'RIFF'):
@@ -200,25 +191,39 @@ class VoiceAssistant:
                     print(f"TTS conversion error: {e}")
                     return
 
-            # Save to temporary WAV file
             import tempfile
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_wav:
                 tmp_wav.write(audio_data)
                 tmp_wav_path = tmp_wav.name
 
-            # Play using a subprocess (aplay or ffplay)
+            # Play using a subprocess (paplay or ffplay), allow interruption
+            player_cmd = None
+            if shutil.which('paplay'):
+                player_cmd = ['paplay', tmp_wav_path]
+            elif shutil.which('ffplay'):
+                player_cmd = ['ffplay', '-nodisp', '-autoexit', tmp_wav_path]
+            else:
+                print("No suitable audio player found (paplay or ffplay required)")
+                import os
+                os.remove(tmp_wav_path)
+                return
+
+            proc = None
             try:
-                # Prefer aplay if available, else ffplay
-                if shutil.which('paplay'):
-                    subprocess.run(['paplay', tmp_wav_path], check=True)
-                elif shutil.which('ffplay'):
-                    subprocess.run(['ffplay', '-nodisp', '-autoexit', tmp_wav_path], check=True)
-                else:
-                    print("No suitable audio player found (aplay or ffplay required)")
+                self._mute_mic()
+                print("Playing audio...")
+                proc = subprocess.Popen(player_cmd)
+                while proc.poll() is None:
+                    try:
+                        time.sleep(0.1)
+                    except KeyboardInterrupt:
+                        print("Playback interrupted by Ctrl-C")
+                        proc.terminate()
+                        proc.wait()
+                        break
             except Exception as e:
                 print(f"Audio playback error: {e}")
             finally:
-                # Remove temp file
                 import os
                 os.remove(tmp_wav_path)
 
@@ -227,6 +232,9 @@ class VoiceAssistant:
             print("Waiting for audio to settle...")
             time.sleep(1.0)
             self._unmute_mic()
+            print("\nflushing input...")
+            self.flush_input()  
+
 
     def _mute_mic(self):
         """Mute the microphone to prevent feedback during playback"""
@@ -313,9 +321,7 @@ class VoiceAssistant:
                     continue
                 
                 # Convert to speech and play
-                self.text_to_speech(response)
-                self.flush_input()  
-                
+                self.text_to_speech(response)                
                 print("\n" + "="*50 + "\n")
                 
         except KeyboardInterrupt:
